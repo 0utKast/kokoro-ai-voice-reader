@@ -51,8 +51,10 @@ async function init() {
 async function loadAndRenderVoices() {
   voiceSelect.innerHTML = '';
   
+  const spanishGroup = document.createElement('optgroup');
+  spanishGroup.label = '🇪🇸 Español (Voces Recomendadas)';
   const englishUSGroup = document.createElement('optgroup');
-  englishUSGroup.label = '🇺🇸 English (US) — Voces Recomendadas';
+  englishUSGroup.label = '🇺🇸 English (US)';
   const englishUKGroup = document.createElement('optgroup');
   englishUKGroup.label = '🇬🇧 English (UK)';
 
@@ -61,13 +63,16 @@ async function loadAndRenderVoices() {
     opt.value = voice.id;
     opt.textContent = `${voice.name} (${voice.gender} - ${voice.desc})`;
 
-    if (voice.lang === 'en-us') {
+    if (voice.lang === 'es') {
+      spanishGroup.appendChild(opt);
+    } else if (voice.lang === 'en-us') {
       englishUSGroup.appendChild(opt);
     } else if (voice.lang === 'en-gb') {
       englishUKGroup.appendChild(opt);
     }
   }
 
+  voiceSelect.appendChild(spanishGroup);
   voiceSelect.appendChild(englishUSGroup);
   voiceSelect.appendChild(englishUKGroup);
 }
@@ -244,11 +249,24 @@ function setupEventListeners() {
     }
   });
 
-  // Extract article from active page
+  // Extract article or selection from active page
   btnExtractArticle.addEventListener('click', async () => {
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab?.id) return;
+      if (!tab?.id || !tab.url) {
+        modelStatusText.textContent = 'No hay ninguna pestaña activa seleccionada.';
+        modelPercentText.textContent = 'ℹ️';
+        modelProgressCard.classList.remove('hidden');
+        return;
+      }
+
+      if (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://') || tab.url.startsWith('edge://') || tab.url.startsWith('about:')) {
+        modelStatusText.textContent = 'Abre una pestaña web normal (ej. Wikipedia o un artículo) para capturar su texto.';
+        modelPercentText.textContent = 'ℹ️';
+        modelProgressBar.style.width = '100%';
+        modelProgressCard.classList.remove('hidden');
+        return;
+      }
 
       let text = '';
       try {
@@ -259,7 +277,10 @@ function setupEventListeners() {
         const [result] = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
           func: () => {
-            const article = document.querySelector('article, main, #content, .mw-parser-output, .post-content');
+            const sel = window.getSelection()?.toString().trim();
+            if (sel && sel.length > 5) return sel;
+
+            const article = document.querySelector('article, main, #content, .mw-parser-output, .post-content, [role="main"]');
             const target = article || document.body;
             const clone = target.cloneNode(true);
             clone.querySelectorAll('script, style, noscript, nav, header, footer, aside, .ad, [aria-hidden="true"]').forEach(e => e.remove());
@@ -269,16 +290,25 @@ function setupEventListeners() {
         text = result?.result || '';
       }
 
-      if (text) {
+      if (text && text.length > 0) {
         textInput.value = text;
         const originalHTML = btnExtractArticle.innerHTML;
         btnExtractArticle.textContent = '✓ Capturado';
+        btnExtractArticle.style.borderColor = 'var(--primary-color)';
         setTimeout(() => {
           btnExtractArticle.innerHTML = originalHTML;
-        }, 1200);
+          btnExtractArticle.style.borderColor = '';
+        }, 1500);
+      } else {
+        modelStatusText.textContent = 'No se detectó texto en la página. Puedes escribir o pegar el texto directamente.';
+        modelPercentText.textContent = 'ℹ️';
+        modelProgressCard.classList.remove('hidden');
       }
     } catch (err) {
       console.warn('Error extracting article:', err);
+      modelStatusText.textContent = `No se pudo extraer: ${err.message}`;
+      modelPercentText.textContent = '⚠️';
+      modelProgressCard.classList.remove('hidden');
     }
   });
 

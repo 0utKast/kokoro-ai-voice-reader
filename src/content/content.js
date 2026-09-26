@@ -167,7 +167,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     case 'EXTRACT_ARTICLE': {
-      const text = extractMainArticleText();
+      const sel = window.getSelection().toString().trim();
+      const text = (sel && sel.length > 5) ? sel : extractMainArticleText();
       sendResponse({ text: text });
       break;
     }
