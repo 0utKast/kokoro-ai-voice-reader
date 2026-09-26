@@ -1,12 +1,20 @@
 /**
  * Storage Helper for Kokoro AI Voice Reader
  */
-import { DEFAULT_SETTINGS } from './constants.js';
+import { DEFAULT_SETTINGS, KOKORO_VOICES } from './constants.js';
 
 export async function getSettings() {
   try {
     const data = await chrome.storage.local.get('kokoro_settings');
-    return { ...DEFAULT_SETTINGS, ...(data.kokoro_settings || {}) };
+    const settings = { ...DEFAULT_SETTINGS, ...(data.kokoro_settings || {}) };
+    
+    // Auto-heal voice setting if previously saved voice is no longer valid
+    const validIds = KOKORO_VOICES.map(v => v.id);
+    if (!validIds.includes(settings.selectedVoice)) {
+      settings.selectedVoice = DEFAULT_SETTINGS.selectedVoice;
+    }
+    
+    return settings;
   } catch (err) {
     console.error('Failed to load settings:', err);
     return DEFAULT_SETTINGS;

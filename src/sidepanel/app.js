@@ -51,10 +51,8 @@ async function init() {
 async function loadAndRenderVoices() {
   voiceSelect.innerHTML = '';
   
-  const spanishGroup = document.createElement('optgroup');
-  spanishGroup.label = '🇪🇸 Español';
   const englishUSGroup = document.createElement('optgroup');
-  englishUSGroup.label = '🇺🇸 English (US)';
+  englishUSGroup.label = '🇺🇸 English (US) — Voces Recomendadas';
   const englishUKGroup = document.createElement('optgroup');
   englishUKGroup.label = '🇬🇧 English (UK)';
 
@@ -63,16 +61,13 @@ async function loadAndRenderVoices() {
     opt.value = voice.id;
     opt.textContent = `${voice.name} (${voice.gender} - ${voice.desc})`;
 
-    if (voice.lang === 'es') {
-      spanishGroup.appendChild(opt);
-    } else if (voice.lang === 'en-us') {
+    if (voice.lang === 'en-us') {
       englishUSGroup.appendChild(opt);
-    } else {
+    } else if (voice.lang === 'en-gb') {
       englishUKGroup.appendChild(opt);
     }
   }
 
-  voiceSelect.appendChild(spanishGroup);
   voiceSelect.appendChild(englishUSGroup);
   voiceSelect.appendChild(englishUKGroup);
 }
@@ -255,9 +250,32 @@ function setupEventListeners() {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab?.id) return;
 
-      const response = await chrome.tabs.sendMessage(tab.id, { type: MESSAGE_TYPES.EXTRACT_ARTICLE });
-      if (response?.text) {
-        textInput.value = response.text;
+      let text = '';
+      try {
+        const response = await chrome.tabs.sendMessage(tab.id, { type: MESSAGE_TYPES.EXTRACT_ARTICLE });
+        text = response?.text || '';
+      } catch {
+        // Tab was loaded before extension reload: inject extractor dynamically
+        const [result] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => {
+            const article = document.querySelector('article, main, #content, .mw-parser-output, .post-content');
+            const target = article || document.body;
+            const clone = target.cloneNode(true);
+            clone.querySelectorAll('script, style, noscript, nav, header, footer, aside, .ad, [aria-hidden="true"]').forEach(e => e.remove());
+            return clone.innerText.trim();
+          }
+        });
+        text = result?.result || '';
+      }
+
+      if (text) {
+        textInput.value = text;
+        const originalHTML = btnExtractArticle.innerHTML;
+        btnExtractArticle.textContent = '✓ Capturado';
+        setTimeout(() => {
+          btnExtractArticle.innerHTML = originalHTML;
+        }, 1200);
       }
     } catch (err) {
       console.warn('Error extracting article:', err);
