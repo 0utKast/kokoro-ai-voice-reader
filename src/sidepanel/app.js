@@ -252,15 +252,18 @@ function setupEventListeners() {
   // Extract article or selection from active page
   btnExtractArticle.addEventListener('click', async () => {
     try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab?.id || !tab.url) {
-        modelStatusText.textContent = 'No hay ninguna pestaña activa seleccionada.';
+      let [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (!tab) {
+        [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      }
+      if (!tab?.id) {
+        modelStatusText.textContent = 'No se encontró la pestaña activa del navegador.';
         modelPercentText.textContent = 'ℹ️';
         modelProgressCard.classList.remove('hidden');
         return;
       }
 
-      if (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://') || tab.url.startsWith('edge://') || tab.url.startsWith('about:')) {
+      if (tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://') || tab.url.startsWith('edge://') || tab.url.startsWith('about:'))) {
         modelStatusText.textContent = 'Abre una pestaña web normal (ej. Wikipedia o un artículo) para capturar su texto.';
         modelPercentText.textContent = 'ℹ️';
         modelProgressBar.style.width = '100%';

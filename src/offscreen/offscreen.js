@@ -32,6 +32,7 @@ let currentVolume = DEFAULT_SETTINGS.volume;
 let abortGeneration = false;
 let totalScheduledChunks = 0;
 let completedChunks = 0;
+let isGenerationDone = false;
 
 // 1. Initialize Audio Context
 function getAudioContext() {
@@ -152,6 +153,7 @@ function stopAudioPlayback() {
   abortGeneration = true;
   isPlaying = false;
   isPaused = false;
+  isGenerationDone = false;
   nextStartTime = 0;
   totalScheduledChunks = 0;
   completedChunks = 0;
@@ -174,6 +176,7 @@ function stopAudioPlayback() {
 async function playText(text, options = {}) {
   stopAudioPlayback();
   abortGeneration = false;
+  isGenerationDone = false;
 
   currentVoice = options.voice || currentVoice;
   currentSpeed = options.speed || currentSpeed;
@@ -227,6 +230,19 @@ async function playText(text, options = {}) {
 
       scheduleChunkPlayback(audioBuffer, chunkIndex++, chunk.text);
     }
+
+    isGenerationDone = true;
+
+    // If all audio already finished playing before generation loop concluded
+    if (completedChunks >= totalScheduledChunks && activeSources.length === 0) {
+      isPlaying = false;
+      chrome.runtime.sendMessage({
+        type: MESSAGE_TYPES.PLAYBACK_STATE,
+        isPlaying: false,
+        isPaused: false,
+        finished: true
+      }).catch(() => {});
+    }
   } catch (err) {
     console.error('Synthesis error during streaming:', err);
     stopAudioPlayback();
@@ -245,7 +261,7 @@ function scheduleChunkPlayback(audioBuffer, chunkIndex, text) {
   source.connect(gainNode);
 
   const duration = audioBuffer.duration / currentSpeed;
-  const startTime = Math.max(ctx.currentTime, nextStartTime);
+  const startTime = Math.max(ctx.currentTime + 0.05, nextStartTime);
   source.start(startTime);
   nextStartTime = startTime + duration;
 
@@ -269,7 +285,7 @@ function scheduleChunkPlayback(audioBuffer, chunkIndex, text) {
     const idx = activeSources.indexOf(source);
     if (idx !== -1) activeSources.splice(idx, 1);
 
-    if (completedChunks >= totalScheduledChunks && activeSources.length === 0) {
+    if (isGenerationDone && completedChunks >= totalScheduledChunks && activeSources.length === 0) {
       isPlaying = false;
       chrome.runtime.sendMessage({
         type: MESSAGE_TYPES.PLAYBACK_STATE,
