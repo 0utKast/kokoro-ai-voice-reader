@@ -4,6 +4,7 @@
 
 import { KOKORO_VOICES, MESSAGE_TYPES, DEFAULT_SETTINGS } from '../shared/constants.js';
 import { getSettings, saveSettings } from '../shared/storage.js';
+import { extractTextFromPDF } from '../shared/pdf-extractor.js';
 
 // DOM Elements
 const hardwareBadge = document.getElementById('hardware-badge');
@@ -20,6 +21,8 @@ const playbackStatusBar = document.getElementById('playback-status-bar');
 const currentChunkBadge = document.getElementById('current-chunk-badge');
 
 const btnExtractArticle = document.getElementById('btn-extract-article');
+const btnLoadFile = document.getElementById('btn-load-file');
+const fileInput = document.getElementById('file-input');
 const btnClearText = document.getElementById('btn-clear-text');
 const btnDownloadWav = document.getElementById('btn-download-wav');
 
@@ -271,6 +274,36 @@ function setupEventListeners() {
         return;
       }
 
+      // Check if active tab is a PDF document
+      if (tab.url && tab.url.toLowerCase().includes('.pdf')) {
+        modelProgressCard.classList.remove('hidden');
+        modelStatusText.textContent = 'Detectado documento PDF en pestaña. Extrayendo texto...';
+        modelPercentText.textContent = '...';
+        modelProgressBar.style.width = '30%';
+
+        try {
+          const resp = await fetch(tab.url);
+          const buf = await resp.arrayBuffer();
+          const pdfText = await extractTextFromPDF(buf, (curr, total) => {
+            modelPercentText.textContent = `${curr}/${total}`;
+            modelProgressBar.style.width = `${Math.round((curr / total) * 100)}%`;
+          });
+          if (pdfText && pdfText.length > 0) {
+            textInput.value = pdfText;
+            modelStatusText.textContent = '✓ Texto del PDF extraído correctamente.';
+            modelPercentText.textContent = '100%';
+            modelProgressBar.style.width = '100%';
+            setTimeout(() => modelProgressCard.classList.add('hidden'), 2000);
+            return;
+          }
+        } catch (pdfErr) {
+          console.warn('Direct PDF fetch failed:', pdfErr);
+          modelStatusText.textContent = 'Para leer un archivo PDF local (file://), pulsa el botón "Cargar PDF / TXT" o arrástralo aquí.';
+          modelPercentText.textContent = 'ℹ️';
+          return;
+        }
+      }
+
       let text = '';
       try {
         const response = await chrome.tabs.sendMessage(tab.id, { type: MESSAGE_TYPES.EXTRACT_ARTICLE });
@@ -314,6 +347,75 @@ function setupEventListeners() {
       modelProgressCard.classList.remove('hidden');
     }
   });
+
+  // Load file (PDF / TXT / MD)
+  btnLoadFile.addEventListener('click', () => {
+    fileInput.click();
+  });
+
+  fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    await handleSelectedFile(file);
+    fileInput.value = '';
+  });
+
+  // Drag and drop onto textInput
+  textInput.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    textInput.style.borderColor = 'var(--primary-color)';
+  });
+  textInput.addEventListener('dragleave', () => {
+    textInput.style.borderColor = '';
+  });
+  textInput.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    textInput.style.borderColor = '';
+    const file = e.dataTransfer?.files?.[0];
+    if (file) {
+      await handleSelectedFile(file);
+    }
+  });
+
+  async function handleSelectedFile(file) {
+    const isPDF = file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf';
+    modelProgressCard.classList.remove('hidden');
+    modelStatusText.textContent = `Cargando ${file.name}...`;
+    modelPercentText.textContent = '...';
+    modelProgressBar.style.width = '20%';
+
+    try {
+      if (isPDF) {
+        modelStatusText.textContent = `Extrayendo texto de ${file.name}...`;
+        const buffer = await file.arrayBuffer();
+        const extracted = await extractTextFromPDF(buffer, (page, total) => {
+          modelPercentText.textContent = `${page}/${total}`;
+          modelProgressBar.style.width = `${Math.round((page / total) * 100)}%`;
+        });
+        if (extracted && extracted.trim()) {
+          textInput.value = extracted;
+          modelStatusText.textContent = `✓ PDF cargado: ${file.name}`;
+          modelPercentText.textContent = '100%';
+          modelProgressBar.style.width = '100%';
+          setTimeout(() => modelProgressCard.classList.add('hidden'), 2500);
+        } else {
+          modelStatusText.textContent = 'El archivo PDF no contiene texto seleccionable (posible imagen o escaneo).';
+          modelPercentText.textContent = '⚠️';
+        }
+      } else {
+        const text = await file.text();
+        textInput.value = text;
+        modelStatusText.textContent = `✓ Archivo cargado: ${file.name}`;
+        modelPercentText.textContent = '100%';
+        modelProgressBar.style.width = '100%';
+        setTimeout(() => modelProgressCard.classList.add('hidden'), 1500);
+      }
+    } catch (err) {
+      console.error('Error reading file:', err);
+      modelStatusText.textContent = `Error al leer archivo: ${err.message}`;
+      modelPercentText.textContent = '❌';
+    }
+  }
 
   // Clear text
   btnClearText.addEventListener('click', () => {
@@ -390,6 +492,9 @@ function setupEventListeners() {
       }
 
       case MESSAGE_TYPES.PLAYBACK_STATE: {
+        if (message.isPlaying) {
+          modelProgressCard.classList.add('hidden');
+        }
         if (message.chunks) {
           renderKaraokeChunks(message.chunks);
         }

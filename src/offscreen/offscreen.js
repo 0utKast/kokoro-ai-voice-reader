@@ -33,6 +33,7 @@ let abortGeneration = false;
 let totalScheduledChunks = 0;
 let completedChunks = 0;
 let isGenerationDone = false;
+let activeSessionId = 0;
 
 // 1. Initialize Audio Context
 function getAudioContext() {
@@ -177,6 +178,7 @@ async function playText(text, options = {}) {
   stopAudioPlayback();
   abortGeneration = false;
   isGenerationDone = false;
+  const sessionId = ++activeSessionId;
 
   currentVoice = options.voice || currentVoice;
   currentSpeed = options.speed || currentSpeed;
@@ -208,9 +210,13 @@ async function playText(text, options = {}) {
 
     // Stream chunks continuously with KokoroTTS
     for await (const chunk of model.stream(text, { voice: currentVoice, speed: currentSpeed })) {
-      if (abortGeneration) break;
+      if (abortGeneration || activeSessionId !== sessionId) break;
 
-      const rawPcm = chunk.audio.audio;
+      const rawPcm = chunk.audio?.audio;
+      if (!rawPcm || rawPcm.length === 0) {
+        continue;
+      }
+
       accumulatedBuffers.push(rawPcm);
       chunkTexts.push(chunk.text);
 
