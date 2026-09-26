@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kokoro AI Voice Reader</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+            <line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>Kokoro AI</h1>
+          <span class="brand-sub">Neural TTS</span>
+        </div>
+      </div>
+      <div id="hardware-badge" class="badge badge-checking">
+        <span class="badge-dot"></span>
+        <span id="hardware-text">Verificando WebGPU...</span>
+      </div>
+    </header>
+
+    <!-- Model Status / Download Progress -->
+    <div id="model-progress-container" class="model-progress-card hidden">
+      <div class="progress-header">
+        <span id="model-status-text">Cargando modelo neuronal...</span>
+        <span id="model-percent-text">0%</span>
+      </div>
+      <div class="progress-track">
+        <div id="model-progress-bar" class="progress-fill" style="width: 0%;"></div>
+      </div>
+    </div>
+
+    <!-- Quick Action Tools -->
+    <section class="tools-bar">
+      <button id="btn-extract-article" class="btn btn-secondary btn-sm" title="Extraer el texto del artículo de la página activa">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Capturar Página
+      </button>
+
+      <button id="btn-clear-text" class="btn btn-ghost btn-sm" title="Limpiar texto">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="3 6 5 6 21 6"></polyline>
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+        </svg>
+        Limpiar
+      </button>
+
+      <button id="btn-download-wav" class="btn btn-ghost btn-sm" title="Descargar audio WAV generado" disabled>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <polyline points="7 10 12 15 17 10"></polyline>
+          <line x1="12" y1="15" x2="12" y2="3"></line>
+        </svg>
+        Descargar WAV
+      </button>
+    </section>
+
+    <!-- Reading / Text Area -->
+    <main class="reading-area">
+      <!-- Edit Mode Textarea -->
+      <textarea id="text-input" class="text-editor" placeholder="Pega aquí el texto que deseas escuchar o selecciona cualquier párrafo en la página web..." rows="6"></textarea>
+
+      <!-- Karaoke Surround Mode Display -->
+      <div id="karaoke-display" class="karaoke-container hidden">
+        <div id="karaoke-chunks" class="chunks-flow"></div>
+      </div>
+    </main>
+
+    <!-- Playback Status Bar -->
+    <div id="playback-status-bar" class="status-bar hidden">
+      <div class="status-info">
+        <span id="current-chunk-badge" class="chunk-counter">Frase 1 de 1</span>
+        <span id="live-speech-rate" class="speed-indicator">24kHz PCM</span>
+      </div>
+    </div>
+
+    <!-- Audio Player Controls -->
+    <footer class="player-controls">
+      <!-- Control Buttons -->
+      <div class="controls-row primary-controls">
+        <button id="btn-prev-chunk" class="btn-icon" title="Frase anterior">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="19 20 9 12 19 4 19 20"></polygon>
+            <line x1="5" y1="19" x2="5" y2="5"></line>
+          </svg>
+        </button>
+
+        <button id="btn-play-pause" class="btn-play" title="Reproducir">
+          <svg id="icon-play" width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+          <svg id="icon-pause" class="hidden" width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="6" y="4" width="4" height="16"></rect>
+            <rect x="14" y="4" width="4" height="16"></rect>
+          </svg>
+        </button>
+
+        <button id="btn-stop" class="btn-icon" title="Detener">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="5" y="5" width="14" height="14"></rect>
+          </svg>
+        </button>
+
+        <button id="btn-next-chunk" class="btn-icon" title="Siguiente frase">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="5 4 15 12 5 20 5 4"></polygon>
+            <line x1="19" y1="5" x2="19" y2="19"></line>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Settings Row: Voice & Speed -->
+      <div class="settings-grid">
+        <div class="setting-item">
+          <label for="voice-select">Voz Neuronal</label>
+          <select id="voice-select" class="form-select"></select>
+        </div>
+
+        <div class="setting-item speed-item">
+          <div class="setting-label-row">
+            <label for="speed-slider">Velocidad</label>
+            <span id="speed-value">1.0x</span>
+          </div>
+          <input type="range" id="speed-slider" min="0.75" max="1.75" step="0.05" value="1.0" class="form-range">
+        </div>
+      </div>
+    </footer>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

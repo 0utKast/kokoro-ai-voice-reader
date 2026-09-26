@@ -1,0 +1,49 @@
+/**
+ * Kokoro AI Voice Reader - Content Script Styles
+ */
+
+#kokoro-floating-pill-host {
+  position: absolute;
+  z-index: 2147483647;
+  pointer-events: auto;
+  user-select: none;
+}
+
+.kokoro-selection-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #0f172a;
+  color: #f8fafc;
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(99, 102, 241, 0.4);
+  cursor: pointer;
+  transform: translateY(-8px);
+  opacity: 0;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.kokoro-selection-pill.visible {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+.kokoro-selection-pill:hover {
+  background: #1e1b4b;
+  box-shadow: 0 6px 22px rgba(99, 102, 241, 0.5), 0 0 0 1px #6366f1;
+  transform: scale(1.04);
+}
+
+.kokoro-pill-icon {
+  display: flex;
+  align-items: center;
+  color: #38bdf8;
+}
+
+.kokoro-pill-label {
+  letter-spacing: 0.2px;
+}
