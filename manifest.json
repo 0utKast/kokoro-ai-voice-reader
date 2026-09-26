@@ -34,7 +34,8 @@
   "host_permissions": [
     "https://huggingface.co/*",
     "https://*.huggingface.co/*",
-    "https://*.hf.space/*"
+    "https://*.hf.space/*",
+    "<all_urls>"
   ],
   "web_accessible_resources": [
     {
