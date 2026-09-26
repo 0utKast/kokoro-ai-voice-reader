@@ -10,6 +10,7 @@ import { encodeWAV } from '../shared/audio-utils.js';
 // Configure local WASM paths for ONNX Runtime Web
 if (env) {
   env.wasmPaths = chrome.runtime.getURL('src/libs/');
+  env.numThreads = 1; // Prevent cross-origin pthread deadlock in Chrome extension
 }
 
 // --- State Variables ---
@@ -63,7 +64,7 @@ async function verifyWebGPUSupport() {
   }
 }
 
-// 3. Initialize Kokoro Engine
+// 3. Initialize Kokoro Engine with Automatic WASM Fallback
 async function initKokoroEngine(preferredDevice = 'webgpu') {
   if (kokoroModel) return kokoroModel;
   if (isModelLoading) {
@@ -84,6 +85,14 @@ async function initKokoroEngine(preferredDevice = 'webgpu') {
   currentDevice = (preferredDevice === 'webgpu' && gpuCheck.supported) ? 'webgpu' : 'wasm';
   const dtype = currentDevice === 'webgpu' ? 'fp32' : 'q8';
 
+  const progressCallback = (progress) => {
+    chrome.runtime.sendMessage({
+      type: MESSAGE_TYPES.MODEL_PROGRESS,
+      status: 'downloading',
+      progress: progress
+    }).catch(() => {});
+  };
+
   try {
     chrome.runtime.sendMessage({
       type: MESSAGE_TYPES.MODEL_PROGRESS,
@@ -92,17 +101,32 @@ async function initKokoroEngine(preferredDevice = 'webgpu') {
       message: `Cargando modelo Kokoro-82M (${currentDevice.toUpperCase()})...`
     }).catch(() => {});
 
-    kokoroModel = await KokoroTTS.from_pretrained(DEFAULT_MODEL_ID, {
-      dtype: dtype,
-      device: currentDevice,
-      progress_callback: (progress) => {
+    try {
+      kokoroModel = await KokoroTTS.from_pretrained(DEFAULT_MODEL_ID, {
+        dtype: dtype,
+        device: currentDevice,
+        progress_callback: progressCallback
+      });
+    } catch (gpuErr) {
+      if (currentDevice === 'webgpu') {
+        console.warn('WebGPU execution provider failed. Falling back to WASM:', gpuErr);
+        currentDevice = 'wasm';
         chrome.runtime.sendMessage({
           type: MESSAGE_TYPES.MODEL_PROGRESS,
-          status: 'downloading',
-          progress: progress
+          status: 'loading',
+          device: 'wasm',
+          message: 'WebGPU no disponible, cargando modo seguro WASM...'
         }).catch(() => {});
+
+        kokoroModel = await KokoroTTS.from_pretrained(DEFAULT_MODEL_ID, {
+          dtype: 'q8',
+          device: 'wasm',
+          progress_callback: progressCallback
+        });
+      } else {
+        throw gpuErr;
       }
-    });
+    }
 
     chrome.runtime.sendMessage({
       type: MESSAGE_TYPES.MODEL_LOADED,
@@ -366,4 +390,4 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-console.log('Kokoro Offscreen Engine (Local kokoro.web.js) Ready.');
+console.log('Kokoro Offscreen Engine (WebGPU + Local WASM & Fallback) Ready.');
