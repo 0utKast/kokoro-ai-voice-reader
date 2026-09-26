@@ -1,0 +1,17 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Dependencies
+node_modules/
+dist/
+build/
+.vite/
+
+# Extension temporary packages & models
+*.crx
+*.zip
+
+# Logs & temp
+*.log
+.eslintcache
