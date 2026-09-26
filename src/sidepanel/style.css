@@ -155,8 +155,15 @@ body {
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, #6366f1, #06b6d4);
-  transition: width 0.2s ease;
+  background: linear-gradient(90deg, #6366f1, #06b6d4, #10b981);
+  background-size: 200% 100%;
+  transition: width 0.25s ease-out;
+  animation: progress-shimmer 2s infinite linear;
+}
+
+@keyframes progress-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
 }
 
 /* Quick Tools Bar */

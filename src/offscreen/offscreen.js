@@ -83,7 +83,7 @@ async function initKokoroEngine(preferredDevice = 'webgpu') {
 
   const gpuCheck = await verifyWebGPUSupport();
   currentDevice = (preferredDevice === 'webgpu' && gpuCheck.supported) ? 'webgpu' : 'wasm';
-  const dtype = currentDevice === 'webgpu' ? 'fp32' : 'q8';
+  const dtype = 'fp32';
 
   const progressCallback = (progress) => {
     chrome.runtime.sendMessage({
@@ -119,7 +119,7 @@ async function initKokoroEngine(preferredDevice = 'webgpu') {
         }).catch(() => {});
 
         kokoroModel = await KokoroTTS.from_pretrained(DEFAULT_MODEL_ID, {
-          dtype: 'q8',
+          dtype: 'fp32',
           device: 'wasm',
           progress_callback: progressCallback
         });

@@ -171,9 +171,9 @@ async function startPlayback() {
 
   // Show status feedback
   modelProgressCard.classList.remove('hidden');
-  modelStatusText.textContent = 'Iniciando generación con WebGPU...';
-  modelPercentText.textContent = '';
-  modelProgressBar.style.width = '100%';
+  modelStatusText.textContent = 'Iniciando motor neuronal...';
+  modelPercentText.textContent = '0%';
+  modelProgressBar.style.width = '5%';
 
   try {
     // Ensure offscreen is ready first
@@ -306,18 +306,36 @@ function setupEventListeners() {
       case MESSAGE_TYPES.MODEL_PROGRESS: {
         modelProgressCard.classList.remove('hidden');
         if (message.message) modelStatusText.textContent = message.message;
-        if (message.progress) {
-          if (typeof message.progress.progress === 'number') {
-            const pct = Math.round(message.progress.progress);
-            modelPercentText.textContent = `${pct}%`;
-            modelProgressBar.style.width = `${pct}%`;
-          } else if (message.progress.loaded && message.progress.total) {
-            const pct = Math.round((message.progress.loaded / message.progress.total) * 100);
-            modelPercentText.textContent = `${pct}%`;
-            modelProgressBar.style.width = `${pct}%`;
-            if (message.progress.file) {
-              modelStatusText.textContent = `Descargando ${message.progress.file}...`;
+        const p = message.progress;
+        if (p) {
+          const fileName = p.file ? p.file.split('/').pop() : 'modelo neuronal';
+          if (p.status === 'initiate') {
+            modelStatusText.textContent = `Iniciando: ${fileName}...`;
+            modelPercentText.textContent = '...';
+            modelProgressBar.style.width = '10%';
+          } else if (p.status === 'done') {
+            modelStatusText.textContent = `Descarga completada: ${fileName}`;
+            modelPercentText.textContent = '100%';
+            modelProgressBar.style.width = '100%';
+          } else if (typeof p.loaded === 'number') {
+            const loadedMB = (p.loaded / 1048576).toFixed(1);
+            if (p.total && p.total > 0) {
+              const totalMB = (p.total / 1048576).toFixed(1);
+              const pct = Math.min(100, Math.round((p.loaded / p.total) * 100));
+              modelStatusText.textContent = `Descargando ${fileName} (${loadedMB} / ${totalMB} MB)...`;
+              modelPercentText.textContent = `${pct}%`;
+              modelProgressBar.style.width = `${pct}%`;
+            } else {
+              // Chunked streaming where total content-length is omitted by CDN
+              modelStatusText.textContent = `Descargando ${fileName} (${loadedMB} MB)...`;
+              modelPercentText.textContent = `${loadedMB} MB`;
+              const estimatedPct = Math.min(95, Math.max(10, Math.round((p.loaded / (325 * 1048576)) * 100)));
+              modelProgressBar.style.width = `${estimatedPct}%`;
             }
+          } else if (typeof p.progress === 'number' && !isNaN(p.progress)) {
+            const pct = Math.min(100, Math.round(p.progress));
+            modelPercentText.textContent = `${pct}%`;
+            modelProgressBar.style.width = `${pct}%`;
           }
         }
         break;

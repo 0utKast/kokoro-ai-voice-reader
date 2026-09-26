@@ -32,7 +32,7 @@
   ],
   "host_permissions": [
     "https://huggingface.co/*",
-    "https://cdn-lfs.huggingface.co/*",
+    "https://*.huggingface.co/*",
     "https://*.hf.space/*"
   ],
   "web_accessible_resources": [
