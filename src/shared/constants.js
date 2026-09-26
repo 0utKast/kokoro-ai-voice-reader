@@ -6,9 +6,9 @@ export const DEFAULT_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
 
 export const KOKORO_VOICES = [
   // Spanish Voices
-  { id: "es_f_dora", name: "Dora", lang: "es", langLabel: "Español", gender: "Femenino", desc: "Cálida, expresiva y narrativa" },
-  { id: "es_m_alex", name: "Alex", lang: "es", langLabel: "Español", gender: "Masculino", desc: "Claro, profesional y didáctico" },
-  { id: "es_m_enrique", name: "Enrique", lang: "es", langLabel: "Español", gender: "Masculino", desc: "Grave, sosegado y solemne" },
+  { id: "ef_dora", name: "Dora", lang: "es", langLabel: "Español", gender: "Femenino", desc: "Cálida, expresiva y narrativa" },
+  { id: "em_alex", name: "Alex", lang: "es", langLabel: "Español", gender: "Masculino", desc: "Claro, profesional y didáctico" },
+  { id: "em_santa", name: "Santa", lang: "es", langLabel: "Español", gender: "Masculino", desc: "Profundo y sosegado" },
   
   // English Voices (US)
   { id: "af_sky", name: "Sky", lang: "en-us", langLabel: "English (US)", gender: "Female", desc: "Expressive & energetic" },
@@ -58,7 +58,7 @@ export const MESSAGE_TYPES = {
 };
 
 export const DEFAULT_SETTINGS = {
-  selectedVoice: "es_f_dora",
+  selectedVoice: "ef_dora",
   speed: 1.0,
   volume: 1.0,
   preferredDevice: "webgpu", // 'webgpu' or 'cpu' (WASM)

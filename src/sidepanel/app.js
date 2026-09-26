@@ -90,6 +90,9 @@ async function loadSavedSettings() {
 
 async function checkHardwareStatus() {
   try {
+    // 1. Ensure offscreen document is alive
+    await chrome.runtime.sendMessage({ type: 'ENSURE_OFFSCREEN' });
+    // 2. Query hardware status from offscreen
     const response = await chrome.runtime.sendMessage({ type: MESSAGE_TYPES.CHECK_ENGINE });
     if (response?.webgpuSupported) {
       hardwareBadge.className = 'badge badge-webgpu';
@@ -171,16 +174,31 @@ async function startPlayback() {
   const voice = voiceSelect.value;
   const speed = parseFloat(speedSlider.value);
 
-  // Send request to background/offscreen
-  await chrome.runtime.sendMessage({
-    type: MESSAGE_TYPES.PLAY_TEXT,
-    text: text,
-    voice: voice,
-    speed: speed,
-    volume: 1.0
-  });
+  // Show status feedback
+  modelProgressCard.classList.remove('hidden');
+  modelStatusText.textContent = 'Iniciando generación con WebGPU...';
+  modelPercentText.textContent = '';
+  modelProgressBar.style.width = '100%';
 
-  updatePlayPauseUI(true, false);
+  try {
+    // Ensure offscreen is ready first
+    await chrome.runtime.sendMessage({ type: 'ENSURE_OFFSCREEN' });
+
+    // Send request to offscreen engine
+    await chrome.runtime.sendMessage({
+      type: MESSAGE_TYPES.PLAY_TEXT,
+      text: text,
+      voice: voice,
+      speed: speed,
+      volume: 1.0
+    });
+
+    updatePlayPauseUI(true, false);
+  } catch (err) {
+    console.error('Error starting playback:', err);
+    modelStatusText.textContent = `Error: ${err.message}`;
+    modelProgressCard.classList.remove('hidden');
+  }
 }
 
 async function pausePlayback() {
@@ -270,16 +288,35 @@ function setupEventListeners() {
       case MESSAGE_TYPES.MODEL_PROGRESS: {
         modelProgressCard.classList.remove('hidden');
         if (message.message) modelStatusText.textContent = message.message;
-        if (message.progress?.progress) {
-          const pct = Math.round(message.progress.progress);
-          modelPercentText.textContent = `${pct}%`;
-          modelProgressBar.style.width = `${pct}%`;
+        if (message.progress) {
+          if (typeof message.progress.progress === 'number') {
+            const pct = Math.round(message.progress.progress);
+            modelPercentText.textContent = `${pct}%`;
+            modelProgressBar.style.width = `${pct}%`;
+          } else if (message.progress.loaded && message.progress.total) {
+            const pct = Math.round((message.progress.loaded / message.progress.total) * 100);
+            modelPercentText.textContent = `${pct}%`;
+            modelProgressBar.style.width = `${pct}%`;
+            if (message.progress.file) {
+              modelStatusText.textContent = `Descargando ${message.progress.file}...`;
+            }
+          }
         }
         break;
       }
 
       case MESSAGE_TYPES.MODEL_LOADED: {
         modelProgressCard.classList.add('hidden');
+        break;
+      }
+
+      case MESSAGE_TYPES.MODEL_ERROR: {
+        modelProgressCard.classList.remove('hidden');
+        modelStatusText.textContent = message.error || 'Error en el modelo neuronal';
+        modelPercentText.textContent = '❌';
+        modelProgressBar.style.width = '100%';
+        modelProgressBar.style.backgroundColor = '#ef4444';
+        updatePlayPauseUI(false, false);
         break;
       }
 

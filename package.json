@@ -20,5 +20,10 @@
     "karaoke-tts"
   ],
   "author": "0utKast",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@huggingface/transformers": "^4.3.0",
+    "esbuild": "^0.28.2",
+    "kokoro-js": "^1.2.1"
+  }
 }

@@ -32,6 +32,15 @@
     "https://cdn-lfs.huggingface.co/*",
     "https://*.hf.space/*"
   ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/libs/*",
+        "src/voices/*"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "content_scripts": [
     {
       "matches": ["<all_urls>"],

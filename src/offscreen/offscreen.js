@@ -3,30 +3,34 @@
  * Runs Kokoro-82M inference on WebGPU and streams seamless audio via Web Audio API.
  */
 
+import { KokoroTTS, env } from '../libs/kokoro.web.js';
 import { MESSAGE_TYPES, DEFAULT_MODEL_ID, DEFAULT_SETTINGS } from '../shared/constants.js';
-import { splitTextIntoChunks, encodeWAV } from '../shared/audio-utils.js';
+import { encodeWAV } from '../shared/audio-utils.js';
+
+// Configure local WASM paths for ONNX Runtime Web
+if (env) {
+  env.wasmPaths = chrome.runtime.getURL('src/libs/');
+}
 
 // --- State Variables ---
 let audioCtx = null;
 let gainNode = null;
 let kokoroModel = null;
 let isModelLoading = false;
-let currentDevice = 'webgpu'; // 'webgpu' or 'cpu'
+let currentDevice = 'webgpu'; // 'webgpu' or 'wasm'
 
 // Playback Queue State
 let isPlaying = false;
 let isPaused = false;
 let activeSources = [];
 let nextStartTime = 0;
-let playbackStartTime = 0;
-let pauseOffset = 0;
-let currentChunks = [];
-let currentChunkIndex = 0;
 let accumulatedBuffers = [];
 let currentVoice = DEFAULT_SETTINGS.selectedVoice;
 let currentSpeed = DEFAULT_SETTINGS.speed;
 let currentVolume = DEFAULT_SETTINGS.volume;
 let abortGeneration = false;
+let totalScheduledChunks = 0;
+let completedChunks = 0;
 
 // 1. Initialize Audio Context
 function getAudioContext() {
@@ -46,12 +50,12 @@ function getAudioContext() {
 // 2. Hardware Capability Check: WebGPU Detection
 async function verifyWebGPUSupport() {
   if (!navigator.gpu) {
-    return { supported: false, reason: "navigator.gpu is not available in this browser" };
+    return { supported: false, reason: "navigator.gpu no está disponible en este navegador." };
   }
   try {
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) {
-      return { supported: false, reason: "No compatible WebGPU adapter found" };
+      return { supported: false, reason: "No se encontró un adaptador GPU compatible." };
     }
     return { supported: true, name: adapter.info?.device || "WebGPU Compatible Device" };
   } catch (err) {
@@ -59,14 +63,14 @@ async function verifyWebGPUSupport() {
   }
 }
 
-// 3. Lazy Load Transformers.js / Kokoro Engine
+// 3. Initialize Kokoro Engine
 async function initKokoroEngine(preferredDevice = 'webgpu') {
   if (kokoroModel) return kokoroModel;
   if (isModelLoading) {
     while (isModelLoading) {
       await new Promise(r => setTimeout(r, 100));
     }
-    return kokoroModel;
+    if (kokoroModel) return kokoroModel;
   }
 
   isModelLoading = true;
@@ -77,7 +81,8 @@ async function initKokoroEngine(preferredDevice = 'webgpu') {
   }).catch(() => {});
 
   const gpuCheck = await verifyWebGPUSupport();
-  currentDevice = (preferredDevice === 'webgpu' && gpuCheck.supported) ? 'webgpu' : 'cpu';
+  currentDevice = (preferredDevice === 'webgpu' && gpuCheck.supported) ? 'webgpu' : 'wasm';
+  const dtype = currentDevice === 'webgpu' ? 'fp32' : 'q8';
 
   try {
     chrome.runtime.sendMessage({
@@ -87,29 +92,17 @@ async function initKokoroEngine(preferredDevice = 'webgpu') {
       message: `Cargando modelo Kokoro-82M (${currentDevice.toUpperCase()})...`
     }).catch(() => {});
 
-    // Import transformers from vendor or CDN fallback
-    let transformers;
-    try {
-      transformers = await import('../libs/transformers.js');
-    } catch {
-      // Dynamic fallback for browser environments
-      transformers = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.3');
-    }
-
-    const { KokoroTTS } = transformers;
-    if (KokoroTTS) {
-      kokoroModel = await KokoroTTS.from_pretrained(DEFAULT_MODEL_ID, {
-        dtype: currentDevice === 'webgpu' ? 'fp32' : 'q8',
-        device: currentDevice,
-        progress_callback: (progress) => {
-          chrome.runtime.sendMessage({
-            type: MESSAGE_TYPES.MODEL_PROGRESS,
-            status: 'downloading',
-            progress: progress
-          }).catch(() => {});
-        }
-      });
-    }
+    kokoroModel = await KokoroTTS.from_pretrained(DEFAULT_MODEL_ID, {
+      dtype: dtype,
+      device: currentDevice,
+      progress_callback: (progress) => {
+        chrome.runtime.sendMessage({
+          type: MESSAGE_TYPES.MODEL_PROGRESS,
+          status: 'downloading',
+          progress: progress
+        }).catch(() => {});
+      }
+    });
 
     chrome.runtime.sendMessage({
       type: MESSAGE_TYPES.MODEL_LOADED,
@@ -122,7 +115,7 @@ async function initKokoroEngine(preferredDevice = 'webgpu') {
     console.error('Failed to load Kokoro TTS engine:', err);
     chrome.runtime.sendMessage({
       type: MESSAGE_TYPES.MODEL_ERROR,
-      error: err.message
+      error: `Error cargando motor: ${err.message}`
     }).catch(() => {});
     throw err;
   } finally {
@@ -130,17 +123,15 @@ async function initKokoroEngine(preferredDevice = 'webgpu') {
   }
 }
 
-// 4. Playback Management
+// 4. Playback Controls
 function stopAudioPlayback() {
   abortGeneration = true;
   isPlaying = false;
   isPaused = false;
   nextStartTime = 0;
-  pauseOffset = 0;
-  currentChunkIndex = 0;
-  currentChunks = [];
+  totalScheduledChunks = 0;
+  completedChunks = 0;
 
-  // Stop and disconnect all scheduled audio nodes
   for (const src of activeSources) {
     try {
       src.stop(0);
@@ -169,60 +160,48 @@ async function playText(text, options = {}) {
     gainNode.gain.value = currentVolume;
   }
 
-  // Split text into natural chunks for fast streaming
-  currentChunks = splitTextIntoChunks(text);
-  if (currentChunks.length === 0) return;
-
   isPlaying = true;
   isPaused = false;
   accumulatedBuffers = [];
-  nextStartTime = ctx.currentTime + 0.05; // Short lead-in
-  playbackStartTime = ctx.currentTime;
+  nextStartTime = ctx.currentTime + 0.05;
+  totalScheduledChunks = 0;
+  completedChunks = 0;
 
   chrome.runtime.sendMessage({
     type: MESSAGE_TYPES.PLAYBACK_STATE,
     isPlaying: true,
-    isPaused: false,
-    totalChunks: currentChunks.length,
-    chunks: currentChunks.map(c => c.text)
+    isPaused: false
   }).catch(() => {});
 
   try {
-    // Ensure engine is ready
-    await initKokoroEngine(options.device || currentDevice);
+    const model = await initKokoroEngine(options.device || currentDevice);
 
-    // Process and synthesize chunks in background pipeline
-    for (let i = 0; i < currentChunks.length; i++) {
+    let chunkIndex = 0;
+    const chunkTexts = [];
+
+    // Stream chunks continuously with KokoroTTS
+    for await (const chunk of model.stream(text, { voice: currentVoice, speed: currentSpeed })) {
       if (abortGeneration) break;
 
-      const chunk = currentChunks[i];
-      currentChunkIndex = i;
-
-      // Synthesize chunk audio
-      let audioResult;
-      if (kokoroModel?.generate) {
-        audioResult = await kokoroModel.generate(chunk.text, {
-          voice: currentVoice
-        });
-      } else {
-        // Fallback simulation for testing pipeline
-        audioResult = {
-          audio: new Float32Array(Math.floor(24000 * Math.max(1, chunk.wordCount * 0.35))),
-          sampling_rate: 24000
-        };
-      }
-
-      if (abortGeneration) break;
-
-      const rawPcm = audioResult.audio || audioResult;
+      const rawPcm = chunk.audio.audio;
       accumulatedBuffers.push(rawPcm);
+      chunkTexts.push(chunk.text);
 
-      // Create Web Audio Buffer
-      const audioBuffer = ctx.createBuffer(1, rawPcm.length, 24000);
+      totalScheduledChunks++;
+
+      // Update side panel with chunks as they stream in
+      chrome.runtime.sendMessage({
+        type: MESSAGE_TYPES.PLAYBACK_STATE,
+        isPlaying: true,
+        isPaused: false,
+        totalChunks: totalScheduledChunks,
+        chunks: chunkTexts
+      }).catch(() => {});
+
+      const audioBuffer = ctx.createBuffer(1, rawPcm.length, chunk.audio.sampling_rate || 24000);
       audioBuffer.copyToChannel(rawPcm, 0);
 
-      // Schedule seamless gapless playback
-      scheduleChunkPlayback(audioBuffer, i, chunk.text);
+      scheduleChunkPlayback(audioBuffer, chunkIndex++, chunk.text);
     }
   } catch (err) {
     console.error('Synthesis error during streaming:', err);
@@ -262,11 +241,11 @@ function scheduleChunkPlayback(audioBuffer, chunkIndex, text) {
   }, delayMs);
 
   source.onended = () => {
+    completedChunks++;
     const idx = activeSources.indexOf(source);
     if (idx !== -1) activeSources.splice(idx, 1);
 
-    // If last chunk ended, finalize playback
-    if (chunkIndex === currentChunks.length - 1 && activeSources.length === 0) {
+    if (completedChunks >= totalScheduledChunks && activeSources.length === 0) {
       isPlaying = false;
       chrome.runtime.sendMessage({
         type: MESSAGE_TYPES.PLAYBACK_STATE,
@@ -311,7 +290,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           volume: message.volume,
           device: message.device
         });
-        sendResponse({ success: true, chunkCount: currentChunks.length });
+        sendResponse({ success: true });
         break;
       }
 
@@ -367,7 +346,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case "DOWNLOAD_WAV": {
         if (accumulatedBuffers.length === 0) {
-          sendResponse({ error: "No audio generated yet." });
+          sendResponse({ error: "No hay audio generado todavía." });
           return;
         }
         const wavBlob = encodeWAV(accumulatedBuffers, 24000);
@@ -380,12 +359,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       default:
-        sendResponse({ received: true });
         break;
     }
   })();
 
-  return true; // Keep channel open
+  return true;
 });
 
-console.log('Kokoro Offscreen Audio Engine Initialized.');
+console.log('Kokoro Offscreen Engine (Local kokoro.web.js) Ready.');

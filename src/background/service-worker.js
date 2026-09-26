@@ -34,7 +34,6 @@ let isCreatingOffscreen = false;
 
 async function ensureOffscreenDocument() {
   if (isCreatingOffscreen) {
-    // Wait briefly if creation is currently underway
     while (isCreatingOffscreen) {
       await new Promise(r => setTimeout(r, 50));
     }
@@ -53,7 +52,6 @@ async function ensureOffscreenDocument() {
       justification: 'Inferencia de Kokoro-82M con WebGPU y streaming continuo de Web Audio'
     });
   } catch (err) {
-    // If document already exists or concurrent call succeeded, ignore
     if (!err.message?.includes('Only a single offscreen document may be created')) {
       console.error('Error creating offscreen document:', err);
     }
@@ -80,14 +78,15 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       }
     }
 
-    // Forward text to offscreen document
+    // Send text to engine
     await chrome.runtime.sendMessage({
       type: MESSAGE_TYPES.PLAY_TEXT,
       text: text,
       voice: settings.selectedVoice,
       speed: settings.speed,
-      volume: settings.volume
-    });
+      volume: settings.volume,
+      origin: 'service_worker'
+    }).catch(() => {});
   }
 });
 
@@ -98,7 +97,6 @@ chrome.commands.onCommand.addListener(async (command) => {
     if (!tab?.id) return;
 
     try {
-      // Ask content script for current selection
       const response = await chrome.tabs.sendMessage(tab.id, { type: MESSAGE_TYPES.READ_SELECTION });
       if (response?.text) {
         await ensureOffscreenDocument();
@@ -108,8 +106,9 @@ chrome.commands.onCommand.addListener(async (command) => {
           text: response.text,
           voice: settings.selectedVoice,
           speed: settings.speed,
-          volume: settings.volume
-        });
+          volume: settings.volume,
+          origin: 'service_worker'
+        }).catch(() => {});
       }
     } catch (err) {
       console.warn('Keyboard command handler error:', err);
@@ -119,50 +118,49 @@ chrome.commands.onCommand.addListener(async (command) => {
   }
 });
 
-// 5. Message Router
+// 5. Service Worker Message Listener (Lifecycle & State tracking only, NO RE-BROADCASTING!)
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // If message originated from service worker itself, ignore to prevent loops
+  if (message.origin === 'service_worker') {
+    return false;
+  }
+
   (async () => {
     try {
       switch (message.type) {
-        case MESSAGE_TYPES.CHECK_ENGINE: {
+        case 'ENSURE_OFFSCREEN': {
           await ensureOffscreenDocument();
-          sendResponse({ success: true, ready: true });
+          sendResponse({ success: true });
           break;
         }
 
         case MESSAGE_TYPES.PLAY_TEXT: {
           await ensureOffscreenDocument();
           await setSessionState({ isPlaying: true, isPaused: false, text: message.text });
-          // Forward to offscreen
-          const res = await chrome.runtime.sendMessage(message);
-          sendResponse(res || { success: true });
+          // Note: Do NOT re-broadcast with chrome.runtime.sendMessage! Offscreen is already listening!
+          sendResponse({ success: true, handledByServiceWorker: true });
           break;
         }
 
         case MESSAGE_TYPES.STOP_PLAYBACK: {
           await setSessionState({ isPlaying: false, isPaused: false });
-          const res = await chrome.runtime.sendMessage(message).catch(() => {});
-          sendResponse(res || { success: true });
-          break;
-        }
-
-        case MESSAGE_TYPES.PAUSE_PLAYBACK:
-        case MESSAGE_TYPES.RESUME_PLAYBACK: {
-          const res = await chrome.runtime.sendMessage(message).catch(() => {});
-          sendResponse(res || { success: true });
+          sendResponse({ success: true });
           break;
         }
 
         default:
-          // Allow unhandled messages to pass through to UI or Offscreen
-          sendResponse({ received: true });
+          // Do not sendResponse here to avoid conflict with offscreen handler
           break;
       }
     } catch (err) {
-      console.error('Service worker message routing error:', err);
+      console.error('Service worker error:', err);
       sendResponse({ error: err.message });
     }
   })();
 
-  return true; // Keep message channel open for async response
+  // Return true only if we are handling the response asynchronously for our specific messages
+  if (message.type === 'ENSURE_OFFSCREEN' || message.type === MESSAGE_TYPES.PLAY_TEXT) {
+    return true;
+  }
+  return false;
 });
