@@ -72,13 +72,13 @@
         Limpiar
       </button>
 
-      <button id="btn-download-wav" class="btn btn-ghost btn-sm" title="Descargar audio WAV generado" disabled>
+      <button id="btn-download-wav" class="btn btn-ghost btn-sm" title="Descargar audio WAV completo (disponible al 100% de la conversión)" disabled>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
           <polyline points="7 10 12 15 17 10"></polyline>
           <line x1="12" y1="15" x2="12" y2="3"></line>
         </svg>
-        Descargar WAV
+        <span id="btn-download-text">Descargar WAV</span>
       </button>
     </section>
 
@@ -96,8 +96,11 @@
     <!-- Playback Status Bar -->
     <div id="playback-status-bar" class="status-bar hidden">
       <div class="status-info">
-        <span id="current-chunk-badge" class="chunk-counter">Frase 1 de 1</span>
-        <span id="live-speech-rate" class="speed-indicator">24kHz PCM</span>
+        <span id="current-chunk-badge" class="chunk-counter">🔊 Frase 1 de 1</span>
+        <span id="conversion-status-badge" class="conversion-indicator">⚡ Sintetizando: 0%</span>
+      </div>
+      <div class="conversion-progress-track" title="Progreso de conversión neuronal a audio">
+        <div id="conversion-progress-fill" class="conversion-progress-bar" style="width: 0%;"></div>
       </div>
     </div>
 

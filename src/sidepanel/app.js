@@ -19,12 +19,15 @@ const karaokeDisplay = document.getElementById('karaoke-display');
 const karaokeChunksContainer = document.getElementById('karaoke-chunks');
 const playbackStatusBar = document.getElementById('playback-status-bar');
 const currentChunkBadge = document.getElementById('current-chunk-badge');
+const conversionStatusBadge = document.getElementById('conversion-status-badge');
+const conversionProgressFill = document.getElementById('conversion-progress-fill');
 
 const btnExtractArticle = document.getElementById('btn-extract-article');
 const btnLoadFile = document.getElementById('btn-load-file');
 const fileInput = document.getElementById('file-input');
 const btnClearText = document.getElementById('btn-clear-text');
 const btnDownloadWav = document.getElementById('btn-download-wav');
+const btnDownloadText = document.getElementById('btn-download-text');
 
 const btnPlayPause = document.getElementById('btn-play-pause');
 const iconPlay = document.getElementById('icon-play');
@@ -42,6 +45,8 @@ let isPlaying = false;
 let isPaused = false;
 let currentChunks = [];
 let activeChunkIndex = 0;
+let totalExpectedChunks = 0;
+let isConversionComplete = false;
 
 // 1. Initialization
 async function init() {
@@ -121,7 +126,6 @@ function updatePlayPauseUI(playing, paused) {
     textInput.classList.add('hidden');
     karaokeDisplay.classList.remove('hidden');
     playbackStatusBar.classList.remove('hidden');
-    btnDownloadWav.disabled = false;
   } else if (playing && paused) {
     iconPlay.classList.remove('hidden');
     iconPause.classList.add('hidden');
@@ -129,9 +133,61 @@ function updatePlayPauseUI(playing, paused) {
     // Stopped
     iconPlay.classList.remove('hidden');
     iconPause.classList.add('hidden');
-    playbackStatusBar.classList.add('hidden');
     textInput.classList.remove('hidden');
     karaokeDisplay.classList.add('hidden');
+    if (!isConversionComplete) {
+      playbackStatusBar.classList.add('hidden');
+    }
+  }
+}
+
+function updateConversionUI(info) {
+  if (!info) return;
+
+  const pct = typeof info.conversionProgress === 'number' ? info.conversionProgress : (isConversionComplete ? 100 : 0);
+  const converted = info.convertedChunks || 0;
+  const total = info.totalExpectedChunks || totalExpectedChunks || 0;
+
+  if (conversionProgressFill) {
+    conversionProgressFill.style.width = `${pct}%`;
+    if (info.isConversionComplete) {
+      conversionProgressFill.classList.add('done');
+    } else {
+      conversionProgressFill.classList.remove('done');
+    }
+  }
+
+  if (conversionStatusBadge) {
+    if (info.isConversionComplete) {
+      conversionStatusBadge.textContent = `✓ Audio completo (${total} frases)`;
+      conversionStatusBadge.classList.add('done');
+    } else if (total > 0) {
+      conversionStatusBadge.textContent = `⚡ Sintetizado: ${converted}/${total} (${pct}%)`;
+      conversionStatusBadge.classList.remove('done');
+    } else {
+      conversionStatusBadge.textContent = `⚡ Sintetizando...`;
+      conversionStatusBadge.classList.remove('done');
+    }
+  }
+
+  // Manage WAV button state
+  if (info.isConversionComplete) {
+    btnDownloadWav.disabled = false;
+    btnDownloadWav.classList.add('btn-download-ready');
+    if (btnDownloadText) btnDownloadText.textContent = 'Descargar WAV';
+    btnDownloadWav.title = `Descargar archivo WAV completo (${total} frases generadas)`;
+  } else if (info.isPlaying) {
+    btnDownloadWav.disabled = true;
+    btnDownloadWav.classList.remove('btn-download-ready');
+    if (btnDownloadText) btnDownloadText.textContent = `WAV (${pct}%)`;
+    btnDownloadWav.title = `Sintetizando audio: ${converted} de ${total} frases (${pct}%). La descarga completa estará lista al finalizar.`;
+  } else {
+    if (!isConversionComplete) {
+      btnDownloadWav.disabled = true;
+      btnDownloadWav.classList.remove('btn-download-ready');
+      if (btnDownloadText) btnDownloadText.textContent = 'Descargar WAV';
+      btnDownloadWav.title = 'Inicia la lectura para sintetizar y descargar el audio';
+    }
   }
 }
 
@@ -161,9 +217,8 @@ function setActiveKaraokeChunk(index) {
     }
   });
 
-  if (currentChunks.length > 0) {
-    currentChunkBadge.textContent = `Frase ${index + 1} de ${currentChunks.length}`;
-  }
+  const total = totalExpectedChunks || currentChunks.length || 1;
+  currentChunkBadge.textContent = `🔊 Frase ${index + 1} de ${total}`;
 }
 
 // 3. User Actions
@@ -173,6 +228,12 @@ async function startPlayback() {
     textInput.focus();
     return;
   }
+
+  isConversionComplete = false;
+  totalExpectedChunks = 0;
+  btnDownloadWav.disabled = true;
+  btnDownloadWav.classList.remove('btn-download-ready');
+  if (btnDownloadText) btnDownloadText.textContent = 'Descargar WAV';
 
   const voice = voiceSelect.value;
   const speed = parseFloat(speedSlider.value);
@@ -434,11 +495,37 @@ function setupEventListeners() {
     stopPlayback();
     textInput.value = '';
     textInput.focus();
+    isConversionComplete = false;
+    totalExpectedChunks = 0;
+    btnDownloadWav.disabled = true;
+    btnDownloadWav.classList.remove('btn-download-ready');
+    if (btnDownloadText) btnDownloadText.textContent = 'Descargar WAV';
+    btnDownloadWav.title = 'Inicia la lectura para sintetizar y descargar el audio';
+    if (conversionProgressFill) {
+      conversionProgressFill.style.width = '0%';
+      conversionProgressFill.classList.remove('done');
+    }
+    if (conversionStatusBadge) {
+      conversionStatusBadge.textContent = '⚡ En espera';
+      conversionStatusBadge.classList.remove('done');
+    }
   });
 
   // Download WAV
   btnDownloadWav.addEventListener('click', async () => {
+    if (!isConversionComplete) {
+      modelProgressCard.classList.remove('hidden');
+      modelStatusText.textContent = 'El audio aún se está procesando en WebGPU. Espera a que la conversión alcance el 100% para descargarlo completo.';
+      modelPercentText.textContent = '⏳';
+      return;
+    }
     const res = await chrome.runtime.sendMessage({ type: 'DOWNLOAD_WAV' });
+    if (res?.error) {
+      modelProgressCard.classList.remove('hidden');
+      modelStatusText.textContent = res.error;
+      modelPercentText.textContent = '⚠️';
+      return;
+    }
     if (res?.dataUrl) {
       const a = document.createElement('a');
       a.href = res.dataUrl;
@@ -510,7 +597,14 @@ function setupEventListeners() {
         if (message.chunks) {
           renderKaraokeChunks(message.chunks);
         }
+        if (typeof message.totalExpectedChunks === 'number') {
+          totalExpectedChunks = message.totalExpectedChunks;
+        }
+        if (typeof message.isConversionComplete === 'boolean') {
+          isConversionComplete = message.isConversionComplete;
+        }
         updatePlayPauseUI(message.isPlaying, message.isPaused);
+        updateConversionUI(message);
         break;
       }
 

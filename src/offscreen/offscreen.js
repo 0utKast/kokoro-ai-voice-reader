@@ -3,7 +3,7 @@
  * Runs Kokoro-82M inference on WebGPU and streams seamless audio via Web Audio API.
  */
 
-import { KokoroTTS, env } from '../libs/kokoro.web.js';
+import { KokoroTTS, TextSplitterStream, env } from '../libs/kokoro.web.js';
 import { MESSAGE_TYPES, DEFAULT_MODEL_ID, DEFAULT_SETTINGS } from '../shared/constants.js';
 import { encodeWAV } from '../shared/audio-utils.js';
 
@@ -34,6 +34,9 @@ let totalScheduledChunks = 0;
 let completedChunks = 0;
 let isGenerationDone = false;
 let activeSessionId = 0;
+let isConversionComplete = false;
+let totalExpectedChunks = 0;
+let convertedChunks = 0;
 
 // 1. Initialize Audio Context
 function getAudioContext() {
@@ -155,6 +158,9 @@ function stopAudioPlayback() {
   isPlaying = false;
   isPaused = false;
   isGenerationDone = false;
+  if (!isConversionComplete) {
+    accumulatedBuffers = [];
+  }
   nextStartTime = 0;
   totalScheduledChunks = 0;
   completedChunks = 0;
@@ -170,7 +176,9 @@ function stopAudioPlayback() {
   chrome.runtime.sendMessage({
     type: MESSAGE_TYPES.PLAYBACK_STATE,
     isPlaying: false,
-    isPaused: false
+    isPaused: false,
+    isConversionComplete: isConversionComplete,
+    conversionProgress: isConversionComplete ? 100 : 0
   }).catch(() => {});
 }
 
@@ -178,6 +186,7 @@ async function playText(text, options = {}) {
   stopAudioPlayback();
   abortGeneration = false;
   isGenerationDone = false;
+  isConversionComplete = false;
   const sessionId = ++activeSessionId;
 
   currentVoice = options.voice || currentVoice;
@@ -195,11 +204,22 @@ async function playText(text, options = {}) {
   nextStartTime = ctx.currentTime + 0.05;
   totalScheduledChunks = 0;
   completedChunks = 0;
+  convertedChunks = 0;
+
+  // Pre-split text using TextSplitterStream to determine exact sentence count
+  const splitter = new TextSplitterStream();
+  splitter.push(text);
+  splitter.close();
+  totalExpectedChunks = splitter.sentences.length;
 
   chrome.runtime.sendMessage({
     type: MESSAGE_TYPES.PLAYBACK_STATE,
     isPlaying: true,
-    isPaused: false
+    isPaused: false,
+    conversionProgress: 0,
+    convertedChunks: 0,
+    totalExpectedChunks: totalExpectedChunks,
+    isConversionComplete: false
   }).catch(() => {});
 
   try {
@@ -208,8 +228,8 @@ async function playText(text, options = {}) {
     let chunkIndex = 0;
     const chunkTexts = [];
 
-    // Stream chunks continuously with KokoroTTS
-    for await (const chunk of model.stream(text, { voice: currentVoice, speed: currentSpeed })) {
+    // Stream chunks continuously with KokoroTTS using the pre-split stream
+    for await (const chunk of model.stream(splitter, { voice: currentVoice, speed: currentSpeed })) {
       if (abortGeneration || activeSessionId !== sessionId) break;
 
       const rawPcm = chunk.audio?.audio;
@@ -221,14 +241,22 @@ async function playText(text, options = {}) {
       chunkTexts.push(chunk.text);
 
       totalScheduledChunks++;
+      convertedChunks++;
+      const conversionPct = totalExpectedChunks > 0 
+        ? Math.min(100, Math.round((convertedChunks / totalExpectedChunks) * 100)) 
+        : 100;
 
-      // Update side panel with chunks as they stream in
+      // Update side panel with streaming audio and live conversion progress
       chrome.runtime.sendMessage({
         type: MESSAGE_TYPES.PLAYBACK_STATE,
         isPlaying: true,
         isPaused: false,
         totalChunks: totalScheduledChunks,
-        chunks: chunkTexts
+        chunks: chunkTexts,
+        conversionProgress: conversionPct,
+        convertedChunks: convertedChunks,
+        totalExpectedChunks: totalExpectedChunks,
+        isConversionComplete: false
       }).catch(() => {});
 
       const audioBuffer = ctx.createBuffer(1, rawPcm.length, chunk.audio.sampling_rate || 24000);
@@ -237,7 +265,22 @@ async function playText(text, options = {}) {
       scheduleChunkPlayback(audioBuffer, chunkIndex++, chunk.text);
     }
 
-    isGenerationDone = true;
+    if (!abortGeneration && activeSessionId === sessionId) {
+      isGenerationDone = true;
+      isConversionComplete = true;
+
+      chrome.runtime.sendMessage({
+        type: MESSAGE_TYPES.PLAYBACK_STATE,
+        isPlaying: isPlaying,
+        isPaused: isPaused,
+        totalChunks: totalScheduledChunks,
+        chunks: chunkTexts,
+        conversionProgress: 100,
+        convertedChunks: totalScheduledChunks,
+        totalExpectedChunks: totalScheduledChunks,
+        isConversionComplete: true
+      }).catch(() => {});
+    }
 
     // If all audio already finished playing before generation loop concluded
     if (completedChunks >= totalScheduledChunks && activeSources.length === 0) {
@@ -246,7 +289,8 @@ async function playText(text, options = {}) {
         type: MESSAGE_TYPES.PLAYBACK_STATE,
         isPlaying: false,
         isPaused: false,
-        finished: true
+        finished: true,
+        isConversionComplete: true
       }).catch(() => {});
     }
   } catch (err) {
@@ -391,6 +435,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case "DOWNLOAD_WAV": {
+        if (!isConversionComplete) {
+          sendResponse({
+            error: `La conversión no ha finalizado todavía (${convertedChunks} de ${totalExpectedChunks} frases sintetizadas). Podrás descargar el archivo WAV cuando se complete el 100%.`
+          });
+          return;
+        }
         if (accumulatedBuffers.length === 0) {
           sendResponse({ error: "No hay audio generado todavía." });
           return;
