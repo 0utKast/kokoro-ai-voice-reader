@@ -95,8 +95,8 @@ English
 ## Developer Info
 **Publisher Name** [REQUIRED]: 0utKast  
 **Contact Email** [REQUIRED]: outkast@local.dev  
-**Support URL**: https://github.com/0utKast/Extension_TextoAVoz/issues  
-**Homepage URL**: https://github.com/0utKast/Extension_TextoAVoz
+**Support URL**: https://github.com/0utKast/kokoro-ai-voice-reader/issues  
+**Homepage URL**: https://github.com/0utKast/kokoro-ai-voice-reader
 
 ---
 
@@ -104,4 +104,5 @@ English
 
 | Version | Date | Changes | Status |
 |---------|------|---------|--------|
+| 1.1.0 | 2026-09-27 | Added integrated PDF reader (local and tab-based), pure JS MP3 audio compression (LameJS, 82% smaller), and decoupled real-time WebGPU synthesis progress tracking. | Ready for Submission |
 | 1.0.0 | 2026-09-26 | Initial release: Manifest V3 with WebGPU Kokoro-82M offline engine, Side Panel UI, and Karaoke mode. | Draft |
