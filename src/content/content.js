@@ -123,12 +123,89 @@ function extractMainArticleText() {
     return false;
   }
 
-  // --- Step 1: Check if page is an Article via Mozilla Readability ---
+  // --- Check if the current page is a Front Page / News Portal / Index ---
+  const currentPath = window.location.pathname || "";
+  const isHomePage = currentPath === "/" || currentPath === "" || currentPath.endsWith("/index.html") || currentPath.endsWith("/index.htm");
+
+  const cardElements = Array.from(document.querySelectorAll("article, [class*=\"article\"], [class*=\"card\"], [class*=\"noticia\"], [data-mrf-link]"));
+
+  const headingLinks = Array.from(document.querySelectorAll("article h1 a, article h2 a, article h3 a, article h4 a, article h5 a, h1 a, h2 a, h3 a, h4 a, h5 a"));
+  const uniqueNewsUrls = new Set(
+    headingLinks
+      .map(a => {
+        try { return new URL(a.href).pathname; } catch { return ""; }
+      })
+      .filter(p => p && p !== currentPath && p !== "/" && p.length > 5)
+  );
+
+  const isFrontPage = isHomePage || uniqueNewsUrls.size >= 4 || cardElements.length >= 6;
+
+  // =========================================================================
+  // CASE 1: FRONT PAGE / PORTADA / FEED / NEWS AGGREGATOR
+  // =========================================================================
+  if (isFrontPage) {
+    const headlines = [];
+    const seenHeadlines = new Set();
+
+    // Strategy 1A: Extract from semantic card containers
+    if (cardElements.length > 0) {
+      cardElements.forEach(card => {
+        const heading = card.querySelector("h1, h2, h3, h4, h5, [class*=\"headline\"], [class*=\"title\"]");
+        if (!heading) return;
+
+        const titleTxt = cleanString(heading.textContent);
+        if (titleTxt.length < 25 || isBoilerplateNoise(titleTxt)) return;
+
+        const norm = titleTxt.toLowerCase().replace(/[^a-záéíóúñ0-9]/g, "");
+        if (seenHeadlines.has(norm)) return;
+        seenHeadlines.add(norm);
+
+        // Find optional lead / summary paragraph in this card (exclude author / date)
+        const leadP = card.querySelector("p:not([class*=\"author\"]):not([class*=\"firma\"]):not([class*=\"byline\"]):not([class*=\"date\"])");
+        let leadTxt = "";
+        if (leadP) {
+          const pTxt = cleanString(leadP.textContent);
+          const pNorm = pTxt.toLowerCase().replace(/[^a-záéíóúñ0-9]/g, "");
+          if (pTxt.length >= 28 && pTxt.length <= 350 && !isBoilerplateNoise(pTxt) && pNorm !== norm) {
+            leadTxt = pTxt;
+          }
+        }
+
+        if (leadTxt) {
+          headlines.push(`${titleTxt}\n   ${leadTxt}`);
+        } else {
+          headlines.push(titleTxt);
+        }
+      });
+    }
+
+    // Strategy 1B: If card elements did not yield enough headlines, try headingLinks directly
+    if (headlines.length < 4 && headingLinks.length > 0) {
+      headingLinks.forEach(a => {
+        const txt = cleanString(a.textContent);
+        if (txt.length < 25 || isBoilerplateNoise(txt)) return;
+        const norm = txt.toLowerCase().replace(/[^a-záéíóúñ0-9]/g, "");
+        if (seenHeadlines.has(norm)) return;
+        seenHeadlines.add(norm);
+        headlines.push(txt);
+      });
+    }
+
+    if (headlines.length > 0) {
+      const rawPageTitle = cleanString(document.title);
+      const siteTitle = rawPageTitle.split(/[-|—·]/)[0].trim() || "Titulares de portada";
+      const topHeadlines = headlines.slice(0, 30);
+      return `${siteTitle} — Titulares destacados:\n\n` + topHeadlines.map((h, i) => `${i + 1}. ${h}`).join("\n\n");
+    }
+  }
+
+  // =========================================================================
+  // CASE 2: SINGLE ARTICLE / WIKIPEDIA / BLOG POST (Readability Engine)
+  // =========================================================================
   const ReadabilityClass = typeof Readability !== "undefined" ? Readability : globalThis.Readability;
   if (typeof ReadabilityClass === "function") {
     try {
       const docClone = document.cloneNode(true);
-      // Remove known noisy elements before Readability parses
       docClone.querySelectorAll("script, style, noscript, nav, header, footer, aside, .advertisement, .ad, [aria-hidden=\"true\"], svg, button, form, .cookie-banner").forEach(el => el.remove());
 
       const reader = new ReadabilityClass(docClone);
@@ -139,26 +216,23 @@ function extractMainArticleText() {
         const tempDiv = document.createElement("div");
         tempDiv.innerHTML = article.content;
 
-        // Clean out any nested ads or noise inside the parsed article
         tempDiv.querySelectorAll(".ad, .advertisement, [class*=\"publicidad\"], [id*=\"publicidad\"]").forEach(el => el.remove());
 
-        const pElements = Array.from(tempDiv.querySelectorAll("p, blockquote"));
+        const pElements = Array.from(tempDiv.querySelectorAll("h1, h2, h3, h4, h5, h6, p, blockquote"));
         const validParagraphs = [];
         const seenBlocks = new Set();
 
-        for (const p of pElements) {
-          const txt = cleanString(p.textContent);
+        for (const el of pElements) {
+          const txt = cleanString(el.textContent);
           if (isBoilerplateNoise(txt)) continue;
-          if (txt.length < 35 && !/[.,:;!?¿¡]/.test(txt)) continue;
-          const norm = txt.toLowerCase();
+          if (txt.length < 25 && !/[.,:;!?¿¡]/.test(txt)) continue;
+          const norm = txt.toLowerCase().replace(/[^a-záéíóúñ0-9]/g, "");
           if (seenBlocks.has(norm)) continue;
           seenBlocks.add(norm);
           validParagraphs.push(txt);
         }
 
-        // A true article has at least 2 real paragraphs or 1 substantial paragraph (>= 180 chars)
-        const isTrueArticle = validParagraphs.length >= 2 || (validParagraphs.length === 1 && validParagraphs[0].length >= 180);
-        if (isTrueArticle) {
+        if (validParagraphs.length > 0) {
           const resultBlocks = [];
           if (title && !isBoilerplateNoise(title)) resultBlocks.push(title);
           if (article.byline) {
@@ -170,69 +244,14 @@ function extractMainArticleText() {
         }
       }
     } catch (readabilityErr) {
-      console.warn("Readability article parse failed, trying front page extractor:", readabilityErr);
+      console.warn("Readability article parse failed, trying fallback:", readabilityErr);
     }
   }
 
-  // --- Step 2: Front Page / News Portal / Headline Extractor ---
-  // If we reach here, the page is a Home page (portada), category index, or news aggregator
-  const headlines = [];
-  const seenHeadlines = new Set();
-
-  // Find candidate headline containers (article cards, headings with links)
-  const cardElements = document.querySelectorAll("article, [class*=\"article\"], [class*=\"card\"], [class*=\"noticia\"], [data-mrf-link]");
-  
-  if (cardElements.length > 0) {
-    cardElements.forEach(card => {
-      const heading = card.querySelector("h1, h2, h3, h4, [class*=\"headline\"], [class*=\"title\"]");
-      if (!heading) return;
-
-      const titleTxt = cleanString(heading.textContent);
-      if (titleTxt.length < 25 || isBoilerplateNoise(titleTxt)) return;
-
-      const norm = titleTxt.toLowerCase();
-      if (seenHeadlines.has(norm)) return;
-      seenHeadlines.add(norm);
-
-      // Check if there is an accompanying summary / lead paragraph in this card
-      const leadP = card.querySelector("p");
-      let leadTxt = "";
-      if (leadP) {
-        const pTxt = cleanString(leadP.textContent);
-        if (pTxt.length >= 35 && pTxt.length <= 300 && !isBoilerplateNoise(pTxt) && pTxt.toLowerCase() !== norm) {
-          leadTxt = pTxt;
-        }
-      }
-
-      if (leadTxt) {
-        headlines.push(`${titleTxt}\n${leadTxt}`);
-      } else {
-        headlines.push(titleTxt);
-      }
-    });
-  }
-
-  // If card elements didn not yield enough, try all standalone headings with links
-  if (headlines.length < 3) {
-    const headingLinks = document.querySelectorAll("h1 a, h2 a, h3 a, h2, h3");
-    headingLinks.forEach(h => {
-      const txt = cleanString(h.textContent);
-      if (txt.length < 25 || isBoilerplateNoise(txt)) return;
-      const norm = txt.toLowerCase();
-      if (seenHeadlines.has(norm)) return;
-      seenHeadlines.add(norm);
-      headlines.push(txt);
-    });
-  }
-
-  if (headlines.length > 0) {
-    const rawPageTitle = cleanString(document.title);
-    const siteTitle = rawPageTitle.split(/[-|—]/)[0].trim() || "Titulares de portada";
-    return `${siteTitle} — Titulares destacados:\n\n` + headlines.map((h, i) => `${i + 1}. ${h}`).join("\n\n");
-  }
-
-  // --- Step 3: Ultimate Fallback for Other Web Pages ---
-  const main = document.querySelector("main, #content, [role=\"main\"]") || document.body;
+  // =========================================================================
+  // CASE 3: ULTIMATE FALLBACK
+  // =========================================================================
+  const main = document.querySelector("article, main, #content, .post-content, .mw-parser-output, [role=\"main\"]") || document.body;
   const clone = main.cloneNode(true);
   clone.querySelectorAll("script, style, noscript, nav, header, footer, aside, .ad, [aria-hidden=\"true\"]").forEach(e => e.remove());
   const pTags = Array.from(clone.querySelectorAll("p, h1, h2, h3, li"));
@@ -240,8 +259,8 @@ function extractMainArticleText() {
   const seenFallback = new Set();
   pTags.forEach(el => {
     const txt = cleanString(el.textContent);
-    if (!isBoilerplateNoise(txt) && txt.length >= 30) {
-      const norm = txt.toLowerCase();
+    if (!isBoilerplateNoise(txt) && txt.length >= 28) {
+      const norm = txt.toLowerCase().replace(/[^a-záéíóúñ0-9]/g, "");
       if (!seenFallback.has(norm)) {
         seenFallback.add(norm);
         fallbackBlocks.push(txt);
