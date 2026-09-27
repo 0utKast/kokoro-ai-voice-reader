@@ -123,3 +123,58 @@ export function encodeWAV(audioBuffers, sampleRate = 24000) {
 
   return new Blob([view], { type: 'audio/wav' });
 }
+
+/**
+ * Encodes Float32Array PCM audio chunks into a valid MP3 Blob using lamejs.
+ * Kokoro default sample rate is 24000 Hz. Mono speech at 64kbps provides
+ * stellar acoustic clarity with ~82% smaller file size than uncompressed WAV,
+ * ideal for long books and full audio documents.
+ */
+export function encodeMP3(audioBuffers, sampleRate = 24000, kbps = 64) {
+  const lame = globalThis.lamejs || (typeof window !== 'undefined' ? window.lamejs : null);
+  if (!lame || !lame.Mp3Encoder) {
+    throw new Error('El codificador MP3 (lamejs) no está disponible en este entorno.');
+  }
+
+  // Calculate total length
+  let totalLength = 0;
+  for (const buf of audioBuffers) {
+    totalLength += buf.length;
+  }
+
+  if (totalLength === 0) {
+    throw new Error('No hay muestras de audio para codificar a MP3.');
+  }
+
+  // Merge into single Int16Array
+  const samples = new Int16Array(totalLength);
+  let offset = 0;
+  for (const buf of audioBuffers) {
+    for (let i = 0; i < buf.length; i++) {
+      let s = Math.max(-1, Math.min(1, buf[i]));
+      samples[offset + i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    offset += buf.length;
+  }
+
+  // MP3 encoder for mono channel
+  const mp3encoder = new lame.Mp3Encoder(1, sampleRate, kbps);
+  const mp3Data = [];
+  const blockSize = 1152;
+
+  for (let i = 0; i < samples.length; i += blockSize) {
+    const chunk = samples.subarray(i, i + blockSize);
+    const mp3buf = mp3encoder.encodeBuffer(chunk);
+    if (mp3buf.length > 0) {
+      mp3Data.push(mp3buf);
+    }
+  }
+
+  const flushBuf = mp3encoder.flush();
+  if (flushBuf.length > 0) {
+    mp3Data.push(flushBuf);
+  }
+
+  return new Blob(mp3Data, { type: 'audio/mp3' });
+}
+

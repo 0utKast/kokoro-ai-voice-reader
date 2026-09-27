@@ -5,7 +5,7 @@
 
 import { KokoroTTS, TextSplitterStream, env } from '../libs/kokoro.web.js';
 import { MESSAGE_TYPES, DEFAULT_MODEL_ID, DEFAULT_SETTINGS } from '../shared/constants.js';
-import { encodeWAV } from '../shared/audio-utils.js';
+import { encodeWAV, encodeMP3 } from '../shared/audio-utils.js';
 
 // Configure local WASM paths for ONNX Runtime Web
 if (env) {
@@ -434,6 +434,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
 
+      case "DOWNLOAD_MP3":
+      case "DOWNLOAD_AUDIO": {
+        if (!isConversionComplete) {
+          sendResponse({
+            error: `La conversión no ha finalizado todavía (${convertedChunks} de ${totalExpectedChunks} frases sintetizadas). Podrás descargar el archivo MP3 cuando se complete el 100%.`
+          });
+          return;
+        }
+        if (accumulatedBuffers.length === 0) {
+          sendResponse({ error: "No hay audio generado todavía." });
+          return;
+        }
+        try {
+          const mp3Blob = encodeMP3(accumulatedBuffers, 24000, 64);
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            sendResponse({ dataUrl: reader.result, format: 'mp3' });
+          };
+          reader.readAsDataURL(mp3Blob);
+        } catch (encErr) {
+          console.warn('Fallo al codificar MP3, usando fallback a WAV:', encErr);
+          const wavBlob = encodeWAV(accumulatedBuffers, 24000);
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            sendResponse({ dataUrl: reader.result, format: 'wav' });
+          };
+          reader.readAsDataURL(wavBlob);
+        }
+        break;
+      }
+
       case "DOWNLOAD_WAV": {
         if (!isConversionComplete) {
           sendResponse({
@@ -448,7 +479,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const wavBlob = encodeWAV(accumulatedBuffers, 24000);
         const reader = new FileReader();
         reader.onloadend = () => {
-          sendResponse({ dataUrl: reader.result });
+          sendResponse({ dataUrl: reader.result, format: 'wav' });
         };
         reader.readAsDataURL(wavBlob);
         break;

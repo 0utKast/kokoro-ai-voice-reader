@@ -123,84 +123,8 @@ function extractMainArticleText() {
     return false;
   }
 
-  // --- Check if the current page is a Front Page / News Portal / Index ---
-  const currentPath = window.location.pathname || "";
-  const isHomePage = currentPath === "/" || currentPath === "" || currentPath.endsWith("/index.html") || currentPath.endsWith("/index.htm");
-
-  const cardElements = Array.from(document.querySelectorAll("article, [class*=\"article\"], [class*=\"card\"], [class*=\"noticia\"], [data-mrf-link]"));
-
-  const headingLinks = Array.from(document.querySelectorAll("article h1 a, article h2 a, article h3 a, article h4 a, article h5 a, h1 a, h2 a, h3 a, h4 a, h5 a"));
-  const uniqueNewsUrls = new Set(
-    headingLinks
-      .map(a => {
-        try { return new URL(a.href).pathname; } catch { return ""; }
-      })
-      .filter(p => p && p !== currentPath && p !== "/" && p.length > 5)
-  );
-
-  const isFrontPage = isHomePage || uniqueNewsUrls.size >= 4 || cardElements.length >= 6;
-
   // =========================================================================
-  // CASE 1: FRONT PAGE / PORTADA / FEED / NEWS AGGREGATOR
-  // =========================================================================
-  if (isFrontPage) {
-    const headlines = [];
-    const seenHeadlines = new Set();
-
-    // Strategy 1A: Extract from semantic card containers
-    if (cardElements.length > 0) {
-      cardElements.forEach(card => {
-        const heading = card.querySelector("h1, h2, h3, h4, h5, [class*=\"headline\"], [class*=\"title\"]");
-        if (!heading) return;
-
-        const titleTxt = cleanString(heading.textContent);
-        if (titleTxt.length < 25 || isBoilerplateNoise(titleTxt)) return;
-
-        const norm = titleTxt.toLowerCase().replace(/[^a-záéíóúñ0-9]/g, "");
-        if (seenHeadlines.has(norm)) return;
-        seenHeadlines.add(norm);
-
-        // Find optional lead / summary paragraph in this card (exclude author / date)
-        const leadP = card.querySelector("p:not([class*=\"author\"]):not([class*=\"firma\"]):not([class*=\"byline\"]):not([class*=\"date\"])");
-        let leadTxt = "";
-        if (leadP) {
-          const pTxt = cleanString(leadP.textContent);
-          const pNorm = pTxt.toLowerCase().replace(/[^a-záéíóúñ0-9]/g, "");
-          if (pTxt.length >= 28 && pTxt.length <= 350 && !isBoilerplateNoise(pTxt) && pNorm !== norm) {
-            leadTxt = pTxt;
-          }
-        }
-
-        if (leadTxt) {
-          headlines.push(`${titleTxt}\n   ${leadTxt}`);
-        } else {
-          headlines.push(titleTxt);
-        }
-      });
-    }
-
-    // Strategy 1B: If card elements did not yield enough headlines, try headingLinks directly
-    if (headlines.length < 4 && headingLinks.length > 0) {
-      headingLinks.forEach(a => {
-        const txt = cleanString(a.textContent);
-        if (txt.length < 25 || isBoilerplateNoise(txt)) return;
-        const norm = txt.toLowerCase().replace(/[^a-záéíóúñ0-9]/g, "");
-        if (seenHeadlines.has(norm)) return;
-        seenHeadlines.add(norm);
-        headlines.push(txt);
-      });
-    }
-
-    if (headlines.length > 0) {
-      const rawPageTitle = cleanString(document.title);
-      const siteTitle = rawPageTitle.split(/[-|—·]/)[0].trim() || "Titulares de portada";
-      const topHeadlines = headlines.slice(0, 30);
-      return `${siteTitle} — Titulares destacados:\n\n` + topHeadlines.map((h, i) => `${i + 1}. ${h}`).join("\n\n");
-    }
-  }
-
-  // =========================================================================
-  // CASE 2: SINGLE ARTICLE / WIKIPEDIA / BLOG POST (Readability Engine)
+  // PRIORITY 1: READABILITY ENGINE (Articles, Wikipedia, Blogs, News Stories)
   // =========================================================================
   const ReadabilityClass = typeof Readability !== "undefined" ? Readability : globalThis.Readability;
   if (typeof ReadabilityClass === "function") {
@@ -232,7 +156,9 @@ function extractMainArticleText() {
           validParagraphs.push(txt);
         }
 
-        if (validParagraphs.length > 0) {
+        // Require at least 2 good paragraphs or a solid body of text (>120 chars) to confirm it is an article
+        const totalTextLength = validParagraphs.reduce((acc, p) => acc + p.length, 0);
+        if (validParagraphs.length >= 2 || totalTextLength > 120) {
           const resultBlocks = [];
           if (title && !isBoilerplateNoise(title)) resultBlocks.push(title);
           if (article.byline) {
@@ -245,6 +171,55 @@ function extractMainArticleText() {
       }
     } catch (readabilityErr) {
       console.warn("Readability article parse failed, trying fallback:", readabilityErr);
+    }
+  }
+
+  // =========================================================================
+  // PRIORITY 2: FRONT PAGE / PORTADA / FEED (Only if truly a homepage or aggregator)
+  // =========================================================================
+  const currentPath = window.location.pathname || "";
+  const isHomePage = currentPath === "/" || currentPath === "" || currentPath.endsWith("/index.html") || currentPath.endsWith("/index.htm");
+  const cardElements = Array.from(document.querySelectorAll("article, [class*=\"article\"], [class*=\"card\"], [class*=\"noticia\"], [data-mrf-link]"));
+
+  if (isHomePage || cardElements.length >= 12) {
+    const headlines = [];
+    const seenHeadlines = new Set();
+
+    if (cardElements.length > 0) {
+      cardElements.forEach(card => {
+        const heading = card.querySelector("h1, h2, h3, h4, h5, [class*=\"headline\"], [class*=\"title\"]");
+        if (!heading) return;
+
+        const titleTxt = cleanString(heading.textContent);
+        if (titleTxt.length < 25 || isBoilerplateNoise(titleTxt)) return;
+
+        const norm = titleTxt.toLowerCase().replace(/[^a-záéíóúñ0-9]/g, "");
+        if (seenHeadlines.has(norm)) return;
+        seenHeadlines.add(norm);
+
+        const leadP = card.querySelector("p:not([class*=\"author\"]):not([class*=\"firma\"]):not([class*=\"byline\"]):not([class*=\"date\"])");
+        let leadTxt = "";
+        if (leadP) {
+          const pTxt = cleanString(leadP.textContent);
+          const pNorm = pTxt.toLowerCase().replace(/[^a-záéíóúñ0-9]/g, "");
+          if (pTxt.length >= 28 && pTxt.length <= 350 && !isBoilerplateNoise(pTxt) && pNorm !== norm) {
+            leadTxt = pTxt;
+          }
+        }
+
+        if (leadTxt) {
+          headlines.push(`${titleTxt}\n   ${leadTxt}`);
+        } else {
+          headlines.push(titleTxt);
+        }
+      });
+    }
+
+    if (headlines.length > 0) {
+      const rawPageTitle = cleanString(document.title);
+      const siteTitle = rawPageTitle.split(/[-|—·]/)[0].trim() || "Titulares de portada";
+      const topHeadlines = headlines.slice(0, 30);
+      return `${siteTitle} — Titulares destacados:\n\n` + topHeadlines.map((h, i) => `${i + 1}. ${h}`).join("\n\n");
     }
   }
 

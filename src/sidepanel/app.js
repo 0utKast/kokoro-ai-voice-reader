@@ -26,7 +26,7 @@ const btnExtractArticle = document.getElementById('btn-extract-article');
 const btnLoadFile = document.getElementById('btn-load-file');
 const fileInput = document.getElementById('file-input');
 const btnClearText = document.getElementById('btn-clear-text');
-const btnDownloadWav = document.getElementById('btn-download-wav');
+const btnDownloadAudio = document.getElementById('btn-download-mp3') || document.getElementById('btn-download-wav');
 const btnDownloadText = document.getElementById('btn-download-text');
 
 const btnPlayPause = document.getElementById('btn-play-pause');
@@ -170,23 +170,23 @@ function updateConversionUI(info) {
     }
   }
 
-  // Manage WAV button state
+  // Manage MP3 download button state
   if (info.isConversionComplete) {
-    btnDownloadWav.disabled = false;
-    btnDownloadWav.classList.add('btn-download-ready');
-    if (btnDownloadText) btnDownloadText.textContent = 'Descargar WAV';
-    btnDownloadWav.title = `Descargar archivo WAV completo (${total} frases generadas)`;
+    btnDownloadAudio.disabled = false;
+    btnDownloadAudio.classList.add('btn-download-ready');
+    if (btnDownloadText) btnDownloadText.textContent = 'Descargar MP3';
+    btnDownloadAudio.title = `Descargar archivo MP3 ligero (${total} frases generadas)`;
   } else if (info.isPlaying) {
-    btnDownloadWav.disabled = true;
-    btnDownloadWav.classList.remove('btn-download-ready');
-    if (btnDownloadText) btnDownloadText.textContent = `WAV (${pct}%)`;
-    btnDownloadWav.title = `Sintetizando audio: ${converted} de ${total} frases (${pct}%). La descarga completa estará lista al finalizar.`;
+    btnDownloadAudio.disabled = true;
+    btnDownloadAudio.classList.remove('btn-download-ready');
+    if (btnDownloadText) btnDownloadText.textContent = `MP3 (${pct}%)`;
+    btnDownloadAudio.title = `Sintetizando audio: ${converted} de ${total} frases (${pct}%). La descarga MP3 estará lista al finalizar.`;
   } else {
     if (!isConversionComplete) {
-      btnDownloadWav.disabled = true;
-      btnDownloadWav.classList.remove('btn-download-ready');
-      if (btnDownloadText) btnDownloadText.textContent = 'Descargar WAV';
-      btnDownloadWav.title = 'Inicia la lectura para sintetizar y descargar el audio';
+      btnDownloadAudio.disabled = true;
+      btnDownloadAudio.classList.remove('btn-download-ready');
+      if (btnDownloadText) btnDownloadText.textContent = 'Descargar MP3';
+      btnDownloadAudio.title = 'Inicia la lectura para sintetizar y descargar el audio MP3';
     }
   }
 }
@@ -231,9 +231,9 @@ async function startPlayback() {
 
   isConversionComplete = false;
   totalExpectedChunks = 0;
-  btnDownloadWav.disabled = true;
-  btnDownloadWav.classList.remove('btn-download-ready');
-  if (btnDownloadText) btnDownloadText.textContent = 'Descargar WAV';
+  btnDownloadAudio.disabled = true;
+  btnDownloadAudio.classList.remove('btn-download-ready');
+  if (btnDownloadText) btnDownloadText.textContent = 'Descargar MP3';
 
   const voice = voiceSelect.value;
   const speed = parseFloat(speedSlider.value);
@@ -497,10 +497,10 @@ function setupEventListeners() {
     textInput.focus();
     isConversionComplete = false;
     totalExpectedChunks = 0;
-    btnDownloadWav.disabled = true;
-    btnDownloadWav.classList.remove('btn-download-ready');
-    if (btnDownloadText) btnDownloadText.textContent = 'Descargar WAV';
-    btnDownloadWav.title = 'Inicia la lectura para sintetizar y descargar el audio';
+    btnDownloadAudio.disabled = true;
+    btnDownloadAudio.classList.remove('btn-download-ready');
+    if (btnDownloadText) btnDownloadText.textContent = 'Descargar MP3';
+    btnDownloadAudio.title = 'Inicia la lectura para sintetizar y descargar el audio MP3';
     if (conversionProgressFill) {
       conversionProgressFill.style.width = '0%';
       conversionProgressFill.classList.remove('done');
@@ -511,15 +511,15 @@ function setupEventListeners() {
     }
   });
 
-  // Download WAV
-  btnDownloadWav.addEventListener('click', async () => {
+  // Download MP3
+  btnDownloadAudio.addEventListener('click', async () => {
     if (!isConversionComplete) {
       modelProgressCard.classList.remove('hidden');
-      modelStatusText.textContent = 'El audio aún se está procesando en WebGPU. Espera a que la conversión alcance el 100% para descargarlo completo.';
+      modelStatusText.textContent = 'El audio aún se está procesando en WebGPU. Espera a que la conversión alcance el 100% para descargarlo completo en MP3.';
       modelPercentText.textContent = '⏳';
       return;
     }
-    const res = await chrome.runtime.sendMessage({ type: 'DOWNLOAD_WAV' });
+    const res = await chrome.runtime.sendMessage({ type: 'DOWNLOAD_MP3' });
     if (res?.error) {
       modelProgressCard.classList.remove('hidden');
       modelStatusText.textContent = res.error;
@@ -527,9 +527,10 @@ function setupEventListeners() {
       return;
     }
     if (res?.dataUrl) {
+      const ext = res.format === 'wav' ? 'wav' : 'mp3';
       const a = document.createElement('a');
       a.href = res.dataUrl;
-      a.download = `kokoro-speech-${Date.now()}.wav`;
+      a.download = `kokoro-speech-${Date.now()}.${ext}`;
       a.click();
     }
   });
