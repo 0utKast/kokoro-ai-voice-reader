@@ -309,21 +309,30 @@ function setupEventListeners() {
         const response = await chrome.tabs.sendMessage(tab.id, { type: MESSAGE_TYPES.EXTRACT_ARTICLE });
         text = response?.text || '';
       } catch {
-        // Tab was loaded before extension reload: inject extractor dynamically
-        const [result] = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          func: () => {
-            const sel = window.getSelection()?.toString().trim();
-            if (sel && sel.length > 5) return sel;
-
-            const article = document.querySelector('article, main, #content, .mw-parser-output, .post-content, [role="main"]');
-            const target = article || document.body;
-            const clone = target.cloneNode(true);
-            clone.querySelectorAll('script, style, noscript, nav, header, footer, aside, .ad, [aria-hidden="true"]').forEach(e => e.remove());
-            return clone.innerText.trim();
-          }
-        });
-        text = result?.result || '';
+        // Tab was loaded before extension reload: inject Readability & content script dynamically
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            files: ['src/libs/Readability.js', 'src/content/content.js']
+          });
+          const response = await chrome.tabs.sendMessage(tab.id, { type: MESSAGE_TYPES.EXTRACT_ARTICLE });
+          text = response?.text || '';
+        } catch (injectErr) {
+          console.warn('Dynamic script injection failed, attempting inline extraction:', injectErr);
+          const [result] = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: () => {
+              const sel = window.getSelection()?.toString().trim();
+              if (sel && sel.length > 5) return sel;
+              const article = document.querySelector('article, main, #content, .mw-parser-output, .post-content, [role="main"]') || document.body;
+              const clone = article.cloneNode(true);
+              clone.querySelectorAll('script, style, noscript, nav, header, footer, aside, .ad, [aria-hidden="true"]').forEach(e => e.remove());
+              const pTags = Array.from(clone.querySelectorAll('p, h1, h2, h3, h4, li')).map(p => p.textContent.trim()).filter(t => t.length > 5);
+              return pTags.length > 0 ? pTags.join('\n\n') : clone.innerText.trim();
+            }
+          });
+          text = result?.result || '';
+        }
       }
 
       if (text && text.length > 0) {

@@ -107,23 +107,62 @@ document.addEventListener('mousedown', (e) => {
   }
 });
 
-// 3. Article Text Extraction Helper
+// 3. Article Text Extraction Helper (Reader Mode via Mozilla Readability)
 function extractMainArticleText() {
-  // Try finding semantic article or main containers
+  // Option A: Primary extraction using Mozilla Readability (industry standard Reader View)
+  const ReadabilityClass = typeof Readability !== "undefined" ? Readability : globalThis.Readability;
+  if (typeof ReadabilityClass === "function") {
+    try {
+      const docClone = document.cloneNode(true);
+      const reader = new ReadabilityClass(docClone);
+      const article = reader.parse();
+
+      if (article && article.textContent && article.textContent.trim().length > 60) {
+        const title = article.title ? article.title.trim() : "";
+        const tempDiv = document.createElement("div");
+        tempDiv.innerHTML = article.content || "";
+
+        const blocks = [];
+        if (title) blocks.push(title);
+
+        // Extract semantic paragraph and heading elements to maintain structure
+        const elements = tempDiv.querySelectorAll("h1, h2, h3, h4, h5, h6, p, li, blockquote");
+        if (elements.length > 0) {
+          elements.forEach(el => {
+            const txt = el.textContent.trim();
+            if (txt && txt.length > 3) {
+              blocks.push(txt);
+            }
+          });
+        }
+
+        if (blocks.length > 1) {
+          return blocks.join("\n\n");
+        } else if (article.textContent.trim()) {
+          return (title ? title + "\n\n" : "") + article.textContent.trim();
+        }
+      }
+    } catch (readabilityErr) {
+      console.warn("Readability extraction failed, falling back to heuristic scraper:", readabilityErr);
+    }
+  }
+
+  // Option B: Fallback heuristic container extraction
   const candidates = [
-    document.querySelector('article'),
-    document.querySelector('[role="article"]'),
-    document.querySelector('main'),
-    document.querySelector('#content'),
-    document.querySelector('.post-content'),
-    document.querySelector('.article-body')
+    document.querySelector("article"),
+    document.querySelector("[role=\"article\"]"),
+    document.querySelector("main"),
+    document.querySelector("#content"),
+    document.querySelector(".mw-parser-output"),
+    document.querySelector(".post-content"),
+    document.querySelector(".article-body")
   ].filter(Boolean);
 
   let targetElement = candidates[0];
 
   // If no semantic article found, find container with the highest paragraph text density
   if (!targetElement) {
-    const paragraphs = Array.from(document.querySelectorAll('p'));
+    const paragraphs = Array.from(document.querySelectorAll("p"));
     if (paragraphs.length > 0) {
       const parentCounts = new Map();
       paragraphs.forEach(p => {
@@ -150,9 +189,18 @@ function extractMainArticleText() {
   // Clone node to clean without affecting live DOM
   const clone = targetElement.cloneNode(true);
   const elementsToRemove = clone.querySelectorAll(
-    'script, style, noscript, nav, header, footer, aside, .advertisement, .ad, [aria-hidden="true"]'
+    "script, style, noscript, nav, header, footer, aside, .advertisement, .ad, [aria-hidden=\"true\"], svg, button, form"
   );
   elementsToRemove.forEach(el => el.remove());
+
+  // Extract structured paragraphs rather than flat raw text
+  const pTags = Array.from(clone.querySelectorAll("p, h1, h2, h3, h4, li"));
+  if (pTags.length > 0) {
+    const parts = pTags.map(p => p.textContent.trim()).filter(t => t.length > 3);
+    if (parts.length > 0) {
+      return parts.join("\n\n");
+    }
+  }
 
   return clone.innerText.trim();
 }

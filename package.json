@@ -23,6 +23,7 @@
   "license": "MIT",
   "dependencies": {
     "@huggingface/transformers": "^4.3.0",
+    "@mozilla/readability": "^0.6.0",
     "esbuild": "^0.28.2",
     "kokoro-js": "^1.2.1",
     "pdfjs-dist": "^6.3.289"
