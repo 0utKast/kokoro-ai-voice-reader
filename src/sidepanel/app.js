@@ -324,10 +324,13 @@ function setupEventListeners() {
             func: () => {
               const sel = window.getSelection()?.toString().trim();
               if (sel && sel.length > 5) return sel;
+              const NOISE = /(publicidad|anuncio|advertisement|patrocinad[oa]|publi\b|hazte socio|suscr[ií]bete|cookies|aviso legal|lo m[aá]s visto|destacadas\b|actualidad\b|v[ií]deos\b|tremending)/i;
               const article = document.querySelector('article, main, #content, .mw-parser-output, .post-content, [role="main"]') || document.body;
               const clone = article.cloneNode(true);
               clone.querySelectorAll('script, style, noscript, nav, header, footer, aside, .ad, [aria-hidden="true"]').forEach(e => e.remove());
-              const pTags = Array.from(clone.querySelectorAll('p, h1, h2, h3, h4, li')).map(p => p.textContent.trim()).filter(t => t.length > 5);
+              const pTags = Array.from(clone.querySelectorAll('p, h1, h2, h3, h4, li'))
+                .map(p => p.textContent.replace(/\s+/g, ' ').trim())
+                .filter(t => t.length >= 30 && !NOISE.test(t));
               return pTags.length > 0 ? pTags.join('\n\n') : clone.innerText.trim();
             }
           });
