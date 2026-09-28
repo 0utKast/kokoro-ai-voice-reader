@@ -37,6 +37,8 @@ let activeSessionId = 0;
 let isConversionComplete = false;
 let totalExpectedChunks = 0;
 let convertedChunks = 0;
+let currentChunkTexts = [];
+let currentActiveChunkIndex = 0;
 
 // 1. Initialize Audio Context
 function getAudioContext() {
@@ -201,6 +203,8 @@ async function playText(text, options = {}) {
   isPlaying = true;
   isPaused = false;
   accumulatedBuffers = [];
+  currentChunkTexts = [];
+  currentActiveChunkIndex = 0;
   nextStartTime = ctx.currentTime + 0.05;
   totalScheduledChunks = 0;
   completedChunks = 0;
@@ -246,6 +250,7 @@ async function playText(text, options = {}) {
 
       accumulatedBuffers.push(cleanPcm);
       chunkTexts.push(chunk.text);
+      currentChunkTexts = chunkTexts;
 
       totalScheduledChunks++;
       convertedChunks++;
@@ -331,6 +336,7 @@ function scheduleChunkPlayback(audioBuffer, chunkIndex, text, isParagraphEnd = f
   const delayMs = Math.max(0, (startTime - ctx.currentTime) * 1000);
   setTimeout(() => {
     if (isPlaying && !abortGeneration) {
+      currentActiveChunkIndex = chunkIndex;
       chrome.runtime.sendMessage({
         type: MESSAGE_TYPES.CURRENT_CHUNK_INDEX,
         chunkIndex: chunkIndex,
@@ -362,6 +368,24 @@ function scheduleChunkPlayback(audioBuffer, chunkIndex, text, isParagraphEnd = f
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     switch (message.type) {
+      case "GET_PLAYBACK_STATE": {
+        const conversionPct = totalExpectedChunks > 0 
+          ? Math.min(100, Math.round((convertedChunks / totalExpectedChunks) * 100)) 
+          : (isConversionComplete ? 100 : 0);
+        sendResponse({
+          isPlaying: isPlaying,
+          isPaused: isPaused,
+          totalChunks: totalScheduledChunks,
+          chunks: currentChunkTexts,
+          chunkIndex: currentActiveChunkIndex,
+          totalExpectedChunks: totalExpectedChunks,
+          convertedChunks: convertedChunks,
+          isConversionComplete: isConversionComplete,
+          conversionProgress: conversionPct
+        });
+        break;
+      }
+
       case MESSAGE_TYPES.CHECK_ENGINE: {
         const gpu = await verifyWebGPUSupport();
         sendResponse({

@@ -60,33 +60,62 @@ async function ensureOffscreenDocument() {
   }
 }
 
+async function waitForOffscreenReady(maxRetries = 25) {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const res = await chrome.runtime.sendMessage({ type: MESSAGE_TYPES.CHECK_ENGINE });
+      if (res?.ready) return true;
+    } catch {
+      // Offscreen engine still initializing
+    }
+    await new Promise(r => setTimeout(r, 60));
+  }
+  return false;
+}
+
+// Unified handler for reading selected text (from context menu, keyboard shortcut, or floating pill)
+async function playSelectedText(rawText, tabId = null) {
+  const text = rawText ? rawText.trim() : '';
+  if (!text) return;
+
+  await ensureOffscreenDocument();
+  await waitForOffscreenReady();
+  const settings = await getSettings();
+
+  // Open side panel if enabled and tabId is present
+  if (settings.autoOpenSidePanel !== false && chrome.sidePanel && tabId) {
+    try {
+      await chrome.sidePanel.open({ tabId });
+    } catch (err) {
+      console.warn('Could not auto-open side panel:', err);
+    }
+  }
+
+  // Send text to side panel input if open
+  chrome.runtime.sendMessage({
+    type: 'SELECTION_TEXT_LOADED',
+    text: text
+  }).catch(() => {});
+
+  await setSessionState({ isPlaying: true, isPaused: false, text: text });
+
+  // Dispatch to offscreen engine with configured voice and speed
+  await chrome.runtime.sendMessage({
+    type: MESSAGE_TYPES.PLAY_TEXT,
+    text: text,
+    voice: settings.selectedVoice,
+    speed: settings.speed,
+    volume: settings.volume,
+    origin: 'service_worker'
+  }).catch((err) => {
+    console.error('Error dispatching PLAY_TEXT to offscreen:', err);
+  });
+}
+
 // 3. Handle Context Menu Click
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === 'kokoro-read-selection' && info.selectionText) {
-    const text = info.selectionText.trim();
-    if (!text) return;
-
-    await ensureOffscreenDocument();
-    const settings = await getSettings();
-
-    // Open side panel if supported
-    if (chrome.sidePanel && tab?.id) {
-      try {
-        await chrome.sidePanel.open({ tabId: tab.id });
-      } catch (err) {
-        console.warn('Could not auto-open side panel:', err);
-      }
-    }
-
-    // Send text to engine
-    await chrome.runtime.sendMessage({
-      type: MESSAGE_TYPES.PLAY_TEXT,
-      text: text,
-      voice: settings.selectedVoice,
-      speed: settings.speed,
-      volume: settings.volume,
-      origin: 'service_worker'
-    }).catch(() => {});
+    await playSelectedText(info.selectionText, tab?.id);
   }
 });
 
@@ -99,16 +128,7 @@ chrome.commands.onCommand.addListener(async (command) => {
     try {
       const response = await chrome.tabs.sendMessage(tab.id, { type: MESSAGE_TYPES.READ_SELECTION });
       if (response?.text) {
-        await ensureOffscreenDocument();
-        const settings = await getSettings();
-        await chrome.runtime.sendMessage({
-          type: MESSAGE_TYPES.PLAY_TEXT,
-          text: response.text,
-          voice: settings.selectedVoice,
-          speed: settings.speed,
-          volume: settings.volume,
-          origin: 'service_worker'
-        }).catch(() => {});
+        await playSelectedText(response.text, tab.id);
       }
     } catch (err) {
       console.warn('Keyboard command handler error:', err);
@@ -130,14 +150,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       switch (message.type) {
         case 'ENSURE_OFFSCREEN': {
           await ensureOffscreenDocument();
+          await waitForOffscreenReady();
+          sendResponse({ success: true });
+          break;
+        }
+
+        case 'PLAY_SELECTION': {
+          await playSelectedText(message.text, sender?.tab?.id);
           sendResponse({ success: true });
           break;
         }
 
         case MESSAGE_TYPES.PLAY_TEXT: {
+          // If sent from a content script, route through playSelectedText to ensure offscreen and load settings
+          if (sender?.tab?.id && message.origin !== 'sidepanel') {
+            await playSelectedText(message.text, sender.tab.id);
+            sendResponse({ success: true, handledByServiceWorker: true });
+            break;
+          }
           await ensureOffscreenDocument();
           await setSessionState({ isPlaying: true, isPaused: false, text: message.text });
-          // Note: Do NOT re-broadcast with chrome.runtime.sendMessage! Offscreen is already listening!
           sendResponse({ success: true, handledByServiceWorker: true });
           break;
         }
@@ -158,8 +190,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
   })();
 
-  // Return true only if we are handling the response asynchronously for our specific messages
-  if (message.type === 'ENSURE_OFFSCREEN' || message.type === MESSAGE_TYPES.PLAY_TEXT) {
+  // Return true if we are handling the response asynchronously for our specific messages
+  if (message.type === 'ENSURE_OFFSCREEN' || message.type === 'PLAY_SELECTION' || message.type === MESSAGE_TYPES.PLAY_TEXT) {
     return true;
   }
   return false;

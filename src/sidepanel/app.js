@@ -40,6 +40,7 @@ const btnNextChunk = document.getElementById('btn-next-chunk');
 const voiceSelect = document.getElementById('voice-select');
 const speedSlider = document.getElementById('speed-slider');
 const speedValue = document.getElementById('speed-value');
+const toggleSelectionPill = document.getElementById('toggle-selection-pill');
 
 // State
 let isPlaying = false;
@@ -54,7 +55,26 @@ async function init() {
   await loadAndRenderVoices();
   await loadSavedSettings();
   await checkHardwareStatus();
+  await syncPlaybackState();
   setupEventListeners();
+}
+
+async function syncPlaybackState() {
+  try {
+    const state = await chrome.runtime.sendMessage({ type: 'GET_PLAYBACK_STATE' });
+    if (state?.isPlaying) {
+      if (state.chunks && state.chunks.length > 0) {
+        renderKaraokeChunks(state.chunks);
+      }
+      if (typeof state.chunkIndex === 'number') {
+        setActiveKaraokeChunk(state.chunkIndex);
+      }
+      updatePlayPauseUI(state.isPlaying, state.isPaused);
+      updateConversionUI(state);
+    }
+  } catch {
+    // Engine not active or playing
+  }
 }
 
 async function loadAndRenderVoices() {
@@ -94,6 +114,9 @@ async function loadSavedSettings() {
   if (settings.speed) {
     speedSlider.value = settings.speed;
     speedValue.textContent = `${parseFloat(settings.speed).toFixed(2)}x`;
+  }
+  if (toggleSelectionPill) {
+    toggleSelectionPill.checked = Boolean(settings.showSelectionPill);
   }
 }
 
@@ -315,6 +338,13 @@ function setupEventListeners() {
       await chrome.runtime.sendMessage({ type: MESSAGE_TYPES.SET_SPEED, speed: val });
     }
   });
+
+  // Floating selection pill toggle
+  if (toggleSelectionPill) {
+    toggleSelectionPill.addEventListener('change', async (e) => {
+      await saveSettings({ showSelectionPill: e.target.checked });
+    });
+  }
 
   // Extract article or selection from active page
   btnExtractArticle.addEventListener('click', async () => {
@@ -667,6 +697,13 @@ function setupEventListeners() {
 
       case MESSAGE_TYPES.CURRENT_CHUNK_INDEX: {
         setActiveKaraokeChunk(message.chunkIndex);
+        break;
+      }
+
+      case 'SELECTION_TEXT_LOADED': {
+        if (message.text && textInput) {
+          textInput.value = message.text;
+        }
         break;
       }
     }

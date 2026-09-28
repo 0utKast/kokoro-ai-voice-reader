@@ -5,6 +5,31 @@
 
 let floatingPillHost = null;
 let currentSelectedText = "";
+let showSelectionPill = false;
+
+// Initialize setting from storage
+try {
+  chrome.storage.local.get('kokoro_settings', (res) => {
+    if (res?.kokoro_settings?.showSelectionPill !== undefined) {
+      showSelectionPill = Boolean(res.kokoro_settings.showSelectionPill);
+    }
+  });
+} catch (err) {
+  console.warn('Kokoro: Error reading initial settings:', err);
+}
+
+// React dynamically to changes in settings without reloading page
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === 'local' && changes.kokoro_settings?.newValue) {
+    const newSettings = changes.kokoro_settings.newValue;
+    if (newSettings.showSelectionPill !== undefined) {
+      showSelectionPill = Boolean(newSettings.showSelectionPill);
+      if (!showSelectionPill) {
+        hidePill();
+      }
+    }
+  }
+});
 
 // 1. Create and manage the floating quick-action pill
 function ensurePillElement() {
@@ -34,13 +59,26 @@ function ensurePillElement() {
       e.preventDefault();
       e.stopPropagation();
 
-      if (currentSelectedText) {
-        chrome.runtime.sendMessage({
-          type: "PLAY_TEXT",
+      if (!currentSelectedText) return;
+
+      const label = pill.querySelector('.kokoro-pill-label');
+      if (label) label.textContent = 'Iniciando lectura...';
+      pill.classList.add('loading');
+
+      try {
+        await chrome.runtime.sendMessage({
+          type: "PLAY_SELECTION",
           text: currentSelectedText
-        }).catch(() => {});
+        });
+      } catch (err) {
+        console.warn('Kokoro: Error al enviar selección para reproducir:', err);
       }
-      hidePill();
+
+      setTimeout(() => {
+        hidePill();
+        if (label) label.textContent = 'Leer con Kokoro';
+        pill.classList.remove('loading');
+      }, 500);
     });
 
     floatingPillHost.appendChild(pill);
@@ -65,32 +103,58 @@ function showPill(x, y) {
 function hidePill() {
   if (floatingPillHost && floatingPillHost.style.display !== 'none') {
     const pill = floatingPillHost.querySelector('.kokoro-selection-pill');
-    pill.classList.remove('visible');
+    if (pill) pill.classList.remove('visible');
     setTimeout(() => {
-      floatingPillHost.style.display = 'none';
+      if (floatingPillHost) floatingPillHost.style.display = 'none';
     }, 180);
   }
 }
 
 // 2. Event Listeners for Selection Detection
 document.addEventListener('mouseup', (e) => {
+  // If feature is disabled by user, do nothing
+  if (!showSelectionPill) {
+    hidePill();
+    return;
+  }
+
   // If clicking on our own pill, ignore
   if (floatingPillHost && floatingPillHost.contains(e.target)) return;
 
+  // Don't show pill inside form inputs, textareas or editable areas
+  const isEditable = e.target && (
+    e.target.isContentEditable ||
+    e.target.tagName === 'INPUT' ||
+    e.target.tagName === 'TEXTAREA'
+  );
+  if (isEditable) {
+    hidePill();
+    return;
+  }
+
   const selection = window.getSelection();
-  const text = selection.toString().trim();
+  const text = selection ? selection.toString().trim() : "";
 
   if (text.length > 3) {
     currentSelectedText = text;
     try {
       const range = selection.getRangeAt(0);
       const rect = range.getBoundingClientRect();
+      if (!rect || (rect.width === 0 && rect.height === 0)) {
+        hidePill();
+        return;
+      }
       const scrollX = window.scrollX || window.pageXOffset;
       const scrollY = window.scrollY || window.pageYOffset;
 
-      // Position pill centered above selection
-      const pillX = rect.left + scrollX + (rect.width / 2) - 60;
-      const pillY = rect.top + scrollY - 38;
+      // Position pill centered above selection, or below if near top
+      let pillX = rect.left + scrollX + (rect.width / 2) - 65;
+      let pillY = rect.top + scrollY - 42;
+
+      if (rect.top < 45 || pillY < scrollY) {
+        pillY = rect.bottom + scrollY + 8;
+      }
+      pillX = Math.max(10, Math.min(window.innerWidth - 150 + scrollX, pillX));
 
       showPill(pillX, pillY);
     } catch {

@@ -47,3 +47,11 @@
 .kokoro-pill-label {
   letter-spacing: 0.2px;
 }
+
+.kokoro-selection-pill.loading {
+  background: #312e81;
+  box-shadow: 0 4px 18px rgba(99, 102, 241, 0.4);
+  pointer-events: none;
+  opacity: 0.92;
+}
+

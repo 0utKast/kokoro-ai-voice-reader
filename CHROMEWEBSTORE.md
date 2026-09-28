@@ -105,7 +105,9 @@ English
 
 | Version | Date | Changes | Status |
 |---------|------|---------|--------|
-| 1.1.2 | 2026-09-28 | Fixed unnatural mid-sentence phrasing pauses with smart sentence grouping, fixed MP3 download execution via native chrome.downloads API, and added explicit downloads permission. | Ready for Submission |
+| 1.1.3 | 2026-09-28 | Added user preference toggle to enable/disable floating selection quick-action pill (disabled by default to prevent intrusion), fixed playback execution when clicking the quick-action pill via unified service worker offscreen orchestration, improved pill positioning and avoided editable input fields. | Ready for Submission |
+| 1.1.2 | 2026-09-28 | Fixed unnatural mid-sentence phrasing pauses with smart sentence grouping, fixed MP3 download execution via native chrome.downloads API, and added explicit downloads permission. | Superseded |
 | 1.1.1 | 2026-09-27 | Internal refinement of audio streaming and offscreen worker initialization. | Superseded |
 | 1.1.0 | 2026-09-27 | Added integrated PDF reader (local and tab-based), pure JS MP3 audio compression (LameJS, 82% smaller), and decoupled real-time WebGPU synthesis progress tracking. | Submitted for Review |
 | 1.0.0 | 2026-09-26 | Initial release: Manifest V3 with WebGPU Kokoro-82M offline engine, Side Panel UI, and Karaoke mode. | Draft |
+

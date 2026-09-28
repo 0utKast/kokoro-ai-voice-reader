@@ -88,5 +88,7 @@ export const DEFAULT_SETTINGS = {
   preferredDevice: "webgpu",
   dtype: "fp32",
   autoOpenSidePanel: true,
-  karaokeHighlight: true
+  karaokeHighlight: true,
+  showSelectionPill: false
 };
+
