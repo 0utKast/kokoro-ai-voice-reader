@@ -1,6 +1,6 @@
 # Chrome Web Store Listing — Kokoro AI Voice Reader
 
-> Last Updated: 2026-09-26
+> Last Updated: 2026-09-28
 
 ## Store Listing
 
@@ -72,6 +72,7 @@ English
 | `storage` | permissions | Saves user preferences locally, including selected voice, playback speed, volume, and speech history. |
 | `activeTab` | permissions | Allows the extension to extract the text content of the currently active article when the user explicitly requests to listen to the page. |
 | `contextMenus` | permissions | Adds an option to the right-click menu so users can instantly read any highlighted text selection. |
+| `downloads` | permissions | Enables users to export and download generated neural speech audio files (MP3/WAV) directly to their local downloads folder for offline listening. |
 | `scripting` | permissions | Injects the content script helper to extract clean article text and highlight sentences on the webpage when requested by the user. |
 
 ---
@@ -104,5 +105,7 @@ English
 
 | Version | Date | Changes | Status |
 |---------|------|---------|--------|
-| 1.1.0 | 2026-09-27 | Added integrated PDF reader (local and tab-based), pure JS MP3 audio compression (LameJS, 82% smaller), and decoupled real-time WebGPU synthesis progress tracking. | Ready for Submission |
+| 1.1.2 | 2026-09-28 | Fixed unnatural mid-sentence phrasing pauses with smart sentence grouping, fixed MP3 download execution via native chrome.downloads API, and added explicit downloads permission. | Ready for Submission |
+| 1.1.1 | 2026-09-27 | Internal refinement of audio streaming and offscreen worker initialization. | Superseded |
+| 1.1.0 | 2026-09-27 | Added integrated PDF reader (local and tab-based), pure JS MP3 audio compression (LameJS, 82% smaller), and decoupled real-time WebGPU synthesis progress tracking. | Submitted for Review |
 | 1.0.0 | 2026-09-26 | Initial release: Manifest V3 with WebGPU Kokoro-82M offline engine, Side Panel UI, and Karaoke mode. | Draft |
