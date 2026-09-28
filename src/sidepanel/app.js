@@ -5,6 +5,7 @@
 import { KOKORO_VOICES, MESSAGE_TYPES, DEFAULT_SETTINGS } from '../shared/constants.js';
 import { getSettings, saveSettings } from '../shared/storage.js';
 import { extractTextFromPDF } from '../shared/pdf-extractor.js';
+import { normalizeTextForSpeech } from '../shared/audio-utils.js';
 
 // DOM Elements
 const hardwareBadge = document.getElementById('hardware-badge');
@@ -223,11 +224,13 @@ function setActiveKaraokeChunk(index) {
 
 // 3. User Actions
 async function startPlayback() {
-  const text = textInput.value.trim();
-  if (!text) {
+  const rawText = textInput.value.trim();
+  if (!rawText) {
     textInput.focus();
     return;
   }
+
+  const text = normalizeTextForSpeech(rawText);
 
   isConversionComplete = false;
   totalExpectedChunks = 0;
@@ -400,7 +403,7 @@ function setupEventListeners() {
       }
 
       if (text && text.length > 0) {
-        textInput.value = text;
+        textInput.value = normalizeTextForSpeech(text);
         const originalHTML = btnExtractArticle.innerHTML;
         btnExtractArticle.textContent = '✓ Capturado';
         btnExtractArticle.style.borderColor = 'var(--primary-color)';
@@ -466,7 +469,7 @@ function setupEventListeners() {
           modelProgressBar.style.width = `${Math.round((page / total) * 100)}%`;
         });
         if (extracted && extracted.trim()) {
-          textInput.value = extracted;
+          textInput.value = normalizeTextForSpeech(extracted);
           modelStatusText.textContent = `✓ PDF cargado: ${file.name}`;
           modelPercentText.textContent = '100%';
           modelProgressBar.style.width = '100%';
@@ -476,8 +479,8 @@ function setupEventListeners() {
           modelPercentText.textContent = '⚠️';
         }
       } else {
-        const text = await file.text();
-        textInput.value = text;
+        const rawText = await file.text();
+        textInput.value = normalizeTextForSpeech(rawText);
         modelStatusText.textContent = `✓ Archivo cargado: ${file.name}`;
         modelPercentText.textContent = '100%';
         modelProgressBar.style.width = '100%';

@@ -4,6 +4,7 @@
  */
 
 import * as pdfjsLib from '../libs/pdf.min.mjs';
+import { normalizeTextForSpeech } from './audio-utils.js';
 
 // Configure Web Worker path for PDF.js inside Chrome Extension
 if (typeof chrome !== 'undefined' && chrome.runtime?.getURL) {
@@ -14,7 +15,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.getURL) {
  * Extracts plain text from a PDF ArrayBuffer
  * @param {ArrayBuffer} arrayBuffer 
  * @param {Function} [onProgress] - Optional progress callback (page, totalPages)
- * @returns {Promise<string>} Clean extracted text
+ * @returns {Promise<string>} Clean, normalized prose text with continuous paragraphs
  */
 export async function extractTextFromPDF(arrayBuffer, onProgress = null) {
   const loadingTask = pdfjsLib.getDocument({
@@ -32,18 +33,20 @@ export async function extractTextFromPDF(arrayBuffer, onProgress = null) {
       const page = await pdf.getPage(pageNum);
       const textContent = await page.getTextContent();
       
-      const pageLines = [];
+      const lines = [];
       let currentLine = '';
       let lastY = null;
+      let lineSpacings = [];
 
       for (const item of textContent.items) {
         if (!item.str) continue;
 
-        // Detect new lines based on Y coordinate change
         const y = item.transform ? item.transform[5] : null;
-        if (lastY !== null && y !== null && Math.abs(y - lastY) > 8) {
+        if (lastY !== null && y !== null && Math.abs(y - lastY) > 6) {
+          const dy = Math.abs(y - lastY);
+          lineSpacings.push(dy);
           if (currentLine.trim()) {
-            pageLines.push(currentLine.trim());
+            lines.push({ text: currentLine.trim(), dy: dy });
           }
           currentLine = item.str;
         } else {
@@ -53,10 +56,46 @@ export async function extractTextFromPDF(arrayBuffer, onProgress = null) {
       }
 
       if (currentLine.trim()) {
-        pageLines.push(currentLine.trim());
+        lines.push({ text: currentLine.trim(), dy: 12 });
       }
 
-      const pageText = pageLines.join('\n');
+      // Calculate median line spacing to distinguish normal line wraps from paragraph gaps
+      const sortedSpacings = [...lineSpacings].sort((a, b) => a - b);
+      const medianSpacing = sortedSpacings.length > 0 
+        ? sortedSpacings[Math.floor(sortedSpacings.length / 2)] 
+        : 12;
+
+      let pageParagraphs = [];
+      let currentPara = '';
+
+      for (let i = 0; i < lines.length; i++) {
+        const { text, dy } = lines[i];
+        if (!text) continue;
+
+        // Paragraph break if vertical gap is noticeably greater than median line height
+        const isParaGap = dy > (medianSpacing * 1.55);
+
+        if (!currentPara) {
+          currentPara = text;
+        } else if (isParaGap) {
+          pageParagraphs.push(currentPara.trim());
+          currentPara = text;
+        } else {
+          // Join lines within the same paragraph
+          if (currentPara.endsWith('-')) {
+            // De-hyphenate word broken across line end
+            currentPara = currentPara.slice(0, -1) + text;
+          } else {
+            currentPara += ' ' + text;
+          }
+        }
+      }
+
+      if (currentPara.trim()) {
+        pageParagraphs.push(currentPara.trim());
+      }
+
+      const pageText = pageParagraphs.join('\n\n');
       if (pageText.trim()) {
         pageTexts.push(pageText.trim());
       }
@@ -69,5 +108,6 @@ export async function extractTextFromPDF(arrayBuffer, onProgress = null) {
     }
   }
 
-  return pageTexts.join('\n\n');
+  const rawExtracted = pageTexts.join('\n\n');
+  return normalizeTextForSpeech(rawExtracted);
 }

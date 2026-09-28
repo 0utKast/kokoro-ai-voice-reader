@@ -1,65 +1,222 @@
-/**
- * Audio Utilities: Text Chunking & WAV Encoding
- */
+import { TextSplitterStream } from '../libs/kokoro.web.js';
+
+const SPANISH_ABBREVIATIONS = [
+  'Sr\\.', 'Sra\\.', 'Srta\\.', 'Dr\\.', 'Dra\\.', 'Prof\\.', 'D\\.', 'Dña\\.',
+  'pág\\.', 'págs\\.', 'ej\\.', 'p\\. ej\\.', 'etc\\.', 'núm\\.', 'vol\\.', 'cap\\.', 'art\\.',
+  'EE\\.UU\\.', 'EE\\. UU\\.', 'U\\.S\\.A\\.', 'a\\.C\\.', 'd\\.C\\.', 'Ud\\.', 'Uds\\.', 'Vd\\.', 'Vds\\.',
+  'Gob\\.', 'Gral\\.', 'Av\\.', 'Avda\\.', 'fig\\.', 'figs\\.', 'op\\. cit\\.', 'ibid\\.'
+];
 
 /**
- * Splits text into natural sentence and clause chunks optimal for Kokoro-82M TTS.
- * Kokoro works best with 10-35 words per chunk for instant streaming response.
+ * Normalizes prose text for high-fidelity speech synthesis:
+ * - Unifies line breaks (\r\n -> \n)
+ * - De-hyphenates words broken across line wraps (e.g. "cosmé-\nticos" -> "cosméticos")
+ * - Unfolds soft line breaks within paragraphs into spaces (preserving real paragraph breaks \n\n)
+ * - Normalizes excessive spacing while preserving semantic structure
  */
-export function splitTextIntoChunks(text, maxWordsPerChunk = 25) {
+export function normalizeTextForSpeech(text) {
+  if (!text || typeof text !== 'string') return '';
+
+  let clean = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+  // 1. Join hyphenated words split across lines
+  clean = clean.replace(/([\p{L}]+)-\s*\n\s*([\p{L}]+)/gu, '$1$2');
+
+  // 2. Unfold soft linebreaks inside paragraphs while preserving paragraph breaks
+  const rawParagraphs = clean.split(/\n{2,}/);
+  const normalizedParagraphs = rawParagraphs.map(para => {
+    const lines = para.split(/\n/).map(l => l.trim()).filter(Boolean);
+    if (lines.length === 0) return '';
+    let combined = lines[0];
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i];
+      // Keep separation if line looks like a list item or heading
+      if (/^[-*•\d+.)]/.test(line)) {
+        combined += '\n\n' + line;
+      } else if (combined.endsWith('-')) {
+        combined = combined.slice(0, -1) + line;
+      } else {
+        combined += ' ' + line;
+      }
+    }
+    return combined;
+  }).filter(Boolean);
+
+  return normalizedParagraphs.join('\n\n').trim();
+}
+
+/**
+ * Splits prose text into complete, grammatically sound sentences.
+ * Protects abbreviations, decimals, and quotation marks so no sentence is cut prematurely.
+ */
+export function splitTextIntoSentences(text) {
   if (!text || typeof text !== 'string') return [];
 
-  // Normalize whitespace
-  const cleanText = text.replace(/\r\n/g, '\n').replace(/\t/g, ' ').trim();
-  if (!cleanText) return [];
+  let protectedText = text;
+  const abbrevMap = new Map();
+  let placeholderId = 0;
 
-  // Split into rough sentences using regex that respects punctuation and quotation
-  const rawSentences = cleanText.match(/[^.!?\n]+[.!?]+|\S[^\n.!?]+$/g) || [cleanText];
+  for (const abb of SPANISH_ABBREVIATIONS) {
+    const re = new RegExp('\\b' + abb, 'gi');
+    protectedText = protectedText.replace(re, (match) => {
+      const ph = `___ABB_${placeholderId++}___`;
+      abbrevMap.set(ph, match);
+      return ph;
+    });
+  }
+
+  // Also protect decimal numbers (e.g. 3.14, 10.5)
+  protectedText = protectedText.replace(/(\d+)\.(\d+)/g, (match) => {
+    const ph = `___ABB_${placeholderId++}___`;
+    abbrevMap.set(ph, match);
+    return ph;
+  });
+
+  // Split on sentence boundaries: punctuation (. ! ? …) followed by space and capital/symbol/quote
+  const rawSentences = protectedText.split(/(?<=[.!?…]["»\x27”)]?)\s+(?=[A-ZÁÉÍÓÚÜÑ¿¡«"“\d])/g);
+
+  const sentences = [];
+  for (let s of rawSentences) {
+    let restored = s.trim();
+    if (!restored) continue;
+    for (const [ph, orig] of abbrevMap) {
+      restored = restored.replaceAll(ph, orig);
+    }
+    sentences.push(restored);
+  }
+
+  return sentences;
+}
+
+/**
+ * Splits text into natural sentence-level and clause chunks optimal for Kokoro-82M TTS.
+ * - Never breaks in the middle of sentences or at commas (unless sentence exceeds maxChunkLimit).
+ * - Groups short sentences together up to target character length for fluent, natural neural prosody.
+ * - Marks paragraph boundaries so audio playback can insert a natural paragraph pause.
+ */
+export function splitTextIntoSmartChunks(text, {
+  firstChunkTarget = 200,
+  normalChunkTarget = 350,
+  maxChunkLimit = 450
+} = {}) {
+  const normalized = normalizeTextForSpeech(text);
+  if (!normalized) return [];
+
+  const paragraphs = normalized.split(/\n{2,}/);
   const chunks = [];
 
-  for (const sentence of rawSentences) {
-    const trimmed = sentence.trim();
-    if (!trimmed) continue;
+  for (let pIdx = 0; pIdx < paragraphs.length; pIdx++) {
+    const para = paragraphs[pIdx].trim();
+    if (!para) continue;
 
-    const words = trimmed.split(/\s+/);
-    if (words.length <= maxWordsPerChunk) {
-      chunks.push({
-        text: trimmed,
-        wordCount: words.length
-      });
-    } else {
-      // Split large sentence by commas, colons or semicolons
-      const subParts = trimmed.split(/([,;:]\s+)/);
-      let currentChunk = "";
-      let currentWords = 0;
+    const sentences = splitTextIntoSentences(para);
+    let currentChunk = "";
 
-      for (let i = 0; i < subParts.length; i++) {
-        const part = subParts[i];
-        const partWordCount = part.trim().split(/\s+/).filter(Boolean).length;
+    for (const sent of sentences) {
+      const s = sent.trim();
+      if (!s) continue;
 
-        if (currentWords + partWordCount > maxWordsPerChunk && currentChunk.length > 0) {
+      const target = (chunks.length === 0 && !currentChunk) ? firstChunkTarget : normalChunkTarget;
+
+      if (!currentChunk) {
+        if (s.length > maxChunkLimit) {
+          // Break oversized sentence by semicolon/colon or comma
+          const subParts = s.split(/(?<=[;:\n—])\s+|(?<=[,])\s+(?=[a-záéíóúüñ])/gi);
+          for (const sp of subParts) {
+            if ((currentChunk + " " + sp).trim().length <= normalChunkTarget) {
+              currentChunk = currentChunk ? (currentChunk + " " + sp) : sp;
+            } else {
+              if (currentChunk.trim()) {
+                chunks.push({
+                  text: currentChunk.trim(),
+                  isParagraphEnd: false,
+                  wordCount: currentChunk.trim().split(/\s+/).filter(Boolean).length
+                });
+              }
+              currentChunk = sp;
+            }
+          }
+        } else {
+          currentChunk = s;
+        }
+      } else {
+        if ((currentChunk + " " + s).length <= target) {
+          currentChunk += " " + s;
+        } else {
           chunks.push({
             text: currentChunk.trim(),
-            wordCount: currentWords
+            isParagraphEnd: false,
+            wordCount: currentChunk.trim().split(/\s+/).filter(Boolean).length
           });
-          currentChunk = part;
-          currentWords = partWordCount;
-        } else {
-          currentChunk += part;
-          currentWords += partWordCount;
+          currentChunk = s;
         }
       }
+    }
 
-      if (currentChunk.trim().length > 0) {
-        chunks.push({
-          text: currentChunk.trim(),
-          wordCount: currentWords
-        });
-      }
+    if (currentChunk.trim()) {
+      chunks.push({
+        text: currentChunk.trim(),
+        isParagraphEnd: true,
+        wordCount: currentChunk.trim().split(/\s+/).filter(Boolean).length
+      });
     }
   }
 
   return chunks;
+}
+
+/**
+ * Backward-compatible helper for legacy chunk consumers.
+ */
+export function splitTextIntoChunks(text, maxWordsPerChunk = 50) {
+  return splitTextIntoSmartChunks(text).map(c => ({
+    text: c.text,
+    wordCount: c.wordCount
+  }));
+}
+
+/**
+ * Custom TextSplitterStream that feeds pre-calculated smart chunks directly
+ * to KokoroTTS.stream without arbitrary clause breaking.
+ */
+export class SmartTextSplitter extends TextSplitterStream {
+  constructor(chunkItems = []) {
+    super();
+    this._chunkObjects = Array.isArray(chunkItems) ? chunkItems : [];
+    this._sentences = this._chunkObjects.map(item => typeof item === 'string' ? item : item.text);
+    this._allChunks = [...this._sentences];
+    this._closed = true;
+  }
+
+  get chunkMetadata() {
+    return this._chunkObjects;
+  }
+
+  get sentences() {
+    return this._allChunks;
+  }
+}
+
+/**
+ * Trims excessive silence from neural TTS PCM waveforms to achieve seamless,
+ * human-like transitions between phrases without artificial gaps.
+ */
+export function trimAudioSilence(pcm, sampleRate = 24000, maxLeadMs = 20, maxTrailMs = 40, threshold = 0.002) {
+  if (!pcm || pcm.length === 0) return pcm;
+  let start = 0;
+  while (start < pcm.length && Math.abs(pcm[start]) < threshold) start++;
+  if (start === pcm.length) return pcm; // entirely silent
+
+  let end = pcm.length - 1;
+  while (end > start && Math.abs(pcm[end]) < threshold) end--;
+
+  const maxLead = Math.round((maxLeadMs * sampleRate) / 1000);
+  const maxTrail = Math.round((maxTrailMs * sampleRate) / 1000);
+
+  const finalStart = Math.max(0, start - maxLead);
+  const finalEnd = Math.min(pcm.length, end + 1 + maxTrail);
+
+  return pcm.subarray(finalStart, finalEnd);
 }
 
 /**

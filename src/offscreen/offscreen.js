@@ -5,7 +5,7 @@
 
 import { KokoroTTS, TextSplitterStream, env } from '../libs/kokoro.web.js';
 import { MESSAGE_TYPES, DEFAULT_MODEL_ID, DEFAULT_SETTINGS } from '../shared/constants.js';
-import { encodeWAV, encodeMP3 } from '../shared/audio-utils.js';
+import { encodeWAV, encodeMP3, normalizeTextForSpeech, splitTextIntoSmartChunks, SmartTextSplitter, trimAudioSilence } from '../shared/audio-utils.js';
 
 // Configure local WASM paths for ONNX Runtime Web
 if (env) {
@@ -206,11 +206,15 @@ async function playText(text, options = {}) {
   completedChunks = 0;
   convertedChunks = 0;
 
-  // Pre-split text using TextSplitterStream to determine exact sentence count
-  const splitter = new TextSplitterStream();
-  splitter.push(text);
-  splitter.close();
-  totalExpectedChunks = splitter.sentences.length;
+  // Pre-split text using smart sentence- and paragraph-aware chunking
+  const smartChunks = splitTextIntoSmartChunks(text, {
+    firstChunkTarget: 200,
+    normalChunkTarget: 350,
+    maxChunkLimit: 450
+  });
+
+  const splitter = new SmartTextSplitter(smartChunks);
+  totalExpectedChunks = smartChunks.length;
 
   chrome.runtime.sendMessage({
     type: MESSAGE_TYPES.PLAYBACK_STATE,
@@ -237,7 +241,10 @@ async function playText(text, options = {}) {
         continue;
       }
 
-      accumulatedBuffers.push(rawPcm);
+      // Trim excessive silence padding from neural vocoder output for seamless streaming
+      const cleanPcm = trimAudioSilence(rawPcm, chunk.audio.sampling_rate || 24000, 20, 40);
+
+      accumulatedBuffers.push(cleanPcm);
       chunkTexts.push(chunk.text);
 
       totalScheduledChunks++;
@@ -259,10 +266,11 @@ async function playText(text, options = {}) {
         isConversionComplete: false
       }).catch(() => {});
 
-      const audioBuffer = ctx.createBuffer(1, rawPcm.length, chunk.audio.sampling_rate || 24000);
-      audioBuffer.copyToChannel(rawPcm, 0);
+      const audioBuffer = ctx.createBuffer(1, cleanPcm.length, chunk.audio.sampling_rate || 24000);
+      audioBuffer.copyToChannel(cleanPcm, 0);
 
-      scheduleChunkPlayback(audioBuffer, chunkIndex++, chunk.text);
+      const isParagraphEnd = splitter.chunkMetadata[chunkIndex]?.isParagraphEnd ?? false;
+      scheduleChunkPlayback(audioBuffer, chunkIndex++, chunk.text, isParagraphEnd);
     }
 
     if (!abortGeneration && activeSessionId === sessionId) {
@@ -303,17 +311,19 @@ async function playText(text, options = {}) {
   }
 }
 
-function scheduleChunkPlayback(audioBuffer, chunkIndex, text) {
+function scheduleChunkPlayback(audioBuffer, chunkIndex, text, isParagraphEnd = false) {
   const ctx = getAudioContext();
   const source = ctx.createBufferSource();
   source.buffer = audioBuffer;
-  source.playbackRate.value = currentSpeed;
+  // Kokoro already synthesizes at currentSpeed during model inference
+  source.playbackRate.value = 1.0;
   source.connect(gainNode);
 
-  const duration = audioBuffer.duration / currentSpeed;
+  const duration = audioBuffer.duration;
   const startTime = Math.max(ctx.currentTime + 0.05, nextStartTime);
   source.start(startTime);
-  nextStartTime = startTime + duration;
+  // Add a slight natural paragraph breath (200ms) only when paragraph ends; within paragraphs keep it seamless (15ms)
+  nextStartTime = startTime + duration + (isParagraphEnd ? 0.20 : 0.015);
 
   activeSources.push(source);
 
