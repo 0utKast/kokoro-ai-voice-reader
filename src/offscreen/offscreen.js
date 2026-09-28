@@ -351,7 +351,8 @@ function scheduleChunkPlayback(audioBuffer, chunkIndex, text, isParagraphEnd = f
         type: MESSAGE_TYPES.PLAYBACK_STATE,
         isPlaying: false,
         isPaused: false,
-        finished: true
+        finished: true,
+        isConversionComplete: true
       }).catch(() => {});
     }
   };
@@ -452,25 +453,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           });
           return;
         }
-        if (accumulatedBuffers.length === 0) {
-          sendResponse({ error: "No hay audio generado todavía." });
+        if (!accumulatedBuffers || accumulatedBuffers.length === 0) {
+          sendResponse({ error: "No hay audio generado todavía para descargar." });
           return;
         }
         try {
-          const mp3Blob = encodeMP3(accumulatedBuffers, 24000, 64);
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            sendResponse({ dataUrl: reader.result, format: 'mp3' });
-          };
-          reader.readAsDataURL(mp3Blob);
-        } catch (encErr) {
-          console.warn('Fallo al codificar MP3, usando fallback a WAV:', encErr);
-          const wavBlob = encodeWAV(accumulatedBuffers, 24000);
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            sendResponse({ dataUrl: reader.result, format: 'wav' });
-          };
-          reader.readAsDataURL(wavBlob);
+          let blob = null;
+          let format = 'mp3';
+          try {
+            blob = encodeMP3(accumulatedBuffers, 24000, 64);
+          } catch (encErr) {
+            console.warn('Fallo al codificar MP3, usando fallback a WAV:', encErr);
+            blob = encodeWAV(accumulatedBuffers, 24000);
+            format = 'wav';
+          }
+
+          const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              if (reader.result) resolve(reader.result);
+              else reject(new Error('FileReader no produjo resultado'));
+            };
+            reader.onerror = () => reject(reader.error || new Error('Error al leer blob'));
+            reader.readAsDataURL(blob);
+          });
+
+          sendResponse({ success: true, dataUrl, format, size: blob.size });
+        } catch (err) {
+          console.error('Error generando archivo de audio:', err);
+          sendResponse({ error: `Error preparando archivo de audio: ${err.message}` });
         }
         break;
       }
@@ -482,16 +493,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           });
           return;
         }
-        if (accumulatedBuffers.length === 0) {
-          sendResponse({ error: "No hay audio generado todavía." });
+        if (!accumulatedBuffers || accumulatedBuffers.length === 0) {
+          sendResponse({ error: "No hay audio generado todavía para descargar." });
           return;
         }
-        const wavBlob = encodeWAV(accumulatedBuffers, 24000);
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          sendResponse({ dataUrl: reader.result, format: 'wav' });
-        };
-        reader.readAsDataURL(wavBlob);
+        try {
+          const wavBlob = encodeWAV(accumulatedBuffers, 24000);
+          const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              if (reader.result) resolve(reader.result);
+              else reject(new Error('FileReader no produjo resultado'));
+            };
+            reader.onerror = () => reject(reader.error || new Error('Error al leer blob'));
+            reader.readAsDataURL(wavBlob);
+          });
+          sendResponse({ success: true, dataUrl, format: 'wav', size: wavBlob.size });
+        } catch (err) {
+          console.error('Error generando archivo WAV:', err);
+          sendResponse({ error: `Error preparando archivo WAV: ${err.message}` });
+        }
         break;
       }
 

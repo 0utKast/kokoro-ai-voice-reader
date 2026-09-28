@@ -522,19 +522,72 @@ function setupEventListeners() {
       modelPercentText.textContent = '⏳';
       return;
     }
-    const res = await chrome.runtime.sendMessage({ type: 'DOWNLOAD_MP3' });
-    if (res?.error) {
+
+    const originalBtnText = btnDownloadText ? btnDownloadText.textContent : 'Descargar MP3';
+    if (btnDownloadText) btnDownloadText.textContent = '⏳ Preparando...';
+    btnDownloadAudio.disabled = true;
+
+    try {
+      await chrome.runtime.sendMessage({ type: 'ENSURE_OFFSCREEN' }).catch(() => {});
+      const res = await chrome.runtime.sendMessage({ type: 'DOWNLOAD_MP3' });
+      if (res?.error) {
+        modelProgressCard.classList.remove('hidden');
+        modelStatusText.textContent = res.error;
+        modelPercentText.textContent = '⚠️';
+        if (btnDownloadText) btnDownloadText.textContent = originalBtnText;
+        btnDownloadAudio.disabled = false;
+        return;
+      }
+
+      if (res?.dataUrl) {
+        const ext = res.format === 'wav' ? 'wav' : 'mp3';
+        const filename = `kokoro-speech-${Date.now()}.${ext}`;
+
+        // 1. Try Chrome native downloads API (highest reliability in extensions)
+        if (chrome.downloads && chrome.downloads.download) {
+          try {
+            await chrome.downloads.download({
+              url: res.dataUrl,
+              filename: filename,
+              saveAs: false
+            });
+            if (btnDownloadText) btnDownloadText.textContent = '✓ Descargado';
+            setTimeout(() => {
+              if (btnDownloadText) btnDownloadText.textContent = originalBtnText;
+              btnDownloadAudio.disabled = false;
+            }, 2500);
+            return;
+          } catch (dlErr) {
+            console.warn('chrome.downloads API fallo, usando fallback DOM:', dlErr);
+          }
+        }
+
+        // 2. Fallback: DOM anchor attached to document body
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = res.dataUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          if (a.parentNode) a.parentNode.removeChild(a);
+        }, 1500);
+
+        if (btnDownloadText) btnDownloadText.textContent = '✓ Descargado';
+        setTimeout(() => {
+          if (btnDownloadText) btnDownloadText.textContent = originalBtnText;
+          btnDownloadAudio.disabled = false;
+        }, 2500);
+      } else {
+        throw new Error('No se recibió la URL de datos del archivo.');
+      }
+    } catch (err) {
+      console.error('Error al descargar audio:', err);
       modelProgressCard.classList.remove('hidden');
-      modelStatusText.textContent = res.error;
-      modelPercentText.textContent = '⚠️';
-      return;
-    }
-    if (res?.dataUrl) {
-      const ext = res.format === 'wav' ? 'wav' : 'mp3';
-      const a = document.createElement('a');
-      a.href = res.dataUrl;
-      a.download = `kokoro-speech-${Date.now()}.${ext}`;
-      a.click();
+      modelStatusText.textContent = `Error al descargar: ${err.message}`;
+      modelPercentText.textContent = '❌';
+      if (btnDownloadText) btnDownloadText.textContent = originalBtnText;
+      btnDownloadAudio.disabled = false;
     }
   });
 

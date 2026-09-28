@@ -29,7 +29,8 @@
     "storage",
     "activeTab",
     "contextMenus",
-    "scripting"
+    "scripting",
+    "downloads"
   ],
   "host_permissions": [
     "https://huggingface.co/*",
