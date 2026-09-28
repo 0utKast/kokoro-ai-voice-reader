@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "icons": "python3 scripts/generate_icons.py",
-    "package": "zip -r dist/kokoro-ai-extension.zip manifest.json icons src CHROMEWEBSTORE.md README.md -x '*.DS_Store*'",
+    "package": "rm -f dist/kokoro-ai-extension.zip && zip -r dist/kokoro-ai-extension.zip manifest.json icons src -x '*.DS_Store*'",
     "test": "echo \"Tests completed.\""
   },
   "keywords": [
