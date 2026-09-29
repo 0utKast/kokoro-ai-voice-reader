@@ -5,7 +5,8 @@
 
 import { KokoroTTS, TextSplitterStream, env } from '../libs/kokoro.web.js';
 import { MESSAGE_TYPES, DEFAULT_MODEL_ID, DEFAULT_SETTINGS } from '../shared/constants.js';
-import { encodeWAV, encodeMP3, normalizeTextForSpeech, splitTextIntoSmartChunks, SmartTextSplitter, trimAudioSilence } from '../shared/audio-utils.js';
+import { encodeWAV, encodeMP3, ProgressiveMp3Encoder, normalizeTextForSpeech, splitTextIntoSmartChunks, SmartTextSplitter, trimAudioSilence } from '../shared/audio-utils.js';
+import { saveAudioBlob, getAudioBlob } from '../shared/audio-storage.js';
 
 // Configure local WASM paths for ONNX Runtime Web
 if (env) {
@@ -26,6 +27,7 @@ let isPaused = false;
 let activeSources = [];
 let nextStartTime = 0;
 let accumulatedBuffers = [];
+let progressiveMp3Encoder = null;
 let currentVoice = DEFAULT_SETTINGS.selectedVoice;
 let currentSpeed = DEFAULT_SETTINGS.speed;
 let currentVolume = DEFAULT_SETTINGS.volume;
@@ -162,6 +164,7 @@ function stopAudioPlayback() {
   isGenerationDone = false;
   if (!isConversionComplete) {
     accumulatedBuffers = [];
+    progressiveMp3Encoder = null;
   }
   nextStartTime = 0;
   totalScheduledChunks = 0;
@@ -203,6 +206,7 @@ async function playText(text, options = {}) {
   isPlaying = true;
   isPaused = false;
   accumulatedBuffers = [];
+  progressiveMp3Encoder = new ProgressiveMp3Encoder(24000, 64);
   currentChunkTexts = [];
   currentActiveChunkIndex = 0;
   nextStartTime = ctx.currentTime + 0.05;
@@ -248,7 +252,20 @@ async function playText(text, options = {}) {
       // Trim excessive silence padding from neural vocoder output for seamless streaming
       const cleanPcm = trimAudioSilence(rawPcm, chunk.audio.sampling_rate || 24000, 20, 40);
 
-      accumulatedBuffers.push(cleanPcm);
+      // Feed directly into incremental MP3 encoder (low memory, instant readiness)
+      if (progressiveMp3Encoder) {
+        try {
+          progressiveMp3Encoder.feed(cleanPcm);
+        } catch (encErr) {
+          console.warn('Error en codificador progresivo MP3:', encErr);
+        }
+      }
+
+      // Keep limited memory buffer for short WAV fallback without risking GB-scale RAM bloat
+      if (accumulatedBuffers.length < 100) {
+        accumulatedBuffers.push(cleanPcm);
+      }
+
       chunkTexts.push(chunk.text);
       currentChunkTexts = chunkTexts;
 
@@ -281,6 +298,21 @@ async function playText(text, options = {}) {
     if (!abortGeneration && activeSessionId === sessionId) {
       isGenerationDone = true;
       isConversionComplete = true;
+
+      // Finalize MP3 and store into IndexedDB immediately (instant download ready)
+      if (progressiveMp3Encoder) {
+        try {
+          const mp3Blob = progressiveMp3Encoder.finish();
+          await saveAudioBlob('latest_book_audio', mp3Blob, {
+            format: 'mp3',
+            totalChunks: totalScheduledChunks,
+            duration: progressiveMp3Encoder.durationSeconds
+          });
+          console.log(`[Kokoro] Audio MP3 guardado en IndexedDB: ${(mp3Blob.size / 1024 / 1024).toFixed(2)} MB (${progressiveMp3Encoder.durationSeconds.toFixed(1)}s)`);
+        } catch (storageErr) {
+          console.error('Error guardando audio MP3 en IndexedDB:', storageErr);
+        }
+      }
 
       chrome.runtime.sendMessage({
         type: MESSAGE_TYPES.PLAYBACK_STATE,
@@ -477,32 +509,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           });
           return;
         }
-        if (!accumulatedBuffers || accumulatedBuffers.length === 0) {
-          sendResponse({ error: "No hay audio generado todavía para descargar." });
-          return;
-        }
+
         try {
-          let blob = null;
-          let format = 'mp3';
-          try {
-            blob = encodeMP3(accumulatedBuffers, 24000, 64);
-          } catch (encErr) {
-            console.warn('Fallo al codificar MP3, usando fallback a WAV:', encErr);
-            blob = encodeWAV(accumulatedBuffers, 24000);
-            format = 'wav';
+          // Check if already finalized and saved in IndexedDB
+          let record = await getAudioBlob('latest_book_audio');
+          let blob = record?.blob;
+          let format = record?.format || 'mp3';
+
+          if (!blob) {
+            // Finalize on-the-fly if not already stored
+            if (progressiveMp3Encoder && progressiveMp3Encoder.totalSamples > 0) {
+              blob = progressiveMp3Encoder.finish();
+              format = 'mp3';
+            } else if (accumulatedBuffers && accumulatedBuffers.length > 0) {
+              blob = encodeMP3(accumulatedBuffers, 24000, 64);
+              format = 'mp3';
+            }
+
+            if (blob) {
+              await saveAudioBlob('latest_book_audio', blob, {
+                format,
+                duration: progressiveMp3Encoder?.durationSeconds || 0
+              });
+              record = { blob, format, size: blob.size };
+            }
           }
 
-          const dataUrl = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => {
-              if (reader.result) resolve(reader.result);
-              else reject(new Error('FileReader no produjo resultado'));
-            };
-            reader.onerror = () => reject(reader.error || new Error('Error al leer blob'));
-            reader.readAsDataURL(blob);
-          });
+          if (!blob || blob.size === 0) {
+            sendResponse({ error: "No hay audio generado todavía para descargar." });
+            return;
+          }
 
-          sendResponse({ success: true, dataUrl, format, size: blob.size });
+          // Return lightweight metadata with IndexedDB storageKey.
+          // Zero IPC size limit issues (message is <100 bytes, avoiding the 64MB Mojo limit!).
+          sendResponse({
+            success: true,
+            storageKey: 'latest_book_audio',
+            format: format,
+            size: blob.size,
+            duration: record?.duration || 0
+          });
         } catch (err) {
           console.error('Error generando archivo de audio:', err);
           sendResponse({ error: `Error preparando archivo de audio: ${err.message}` });
@@ -518,21 +564,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
         if (!accumulatedBuffers || accumulatedBuffers.length === 0) {
-          sendResponse({ error: "No hay audio generado todavía para descargar." });
+          sendResponse({ error: "No hay muestras WAV directas en memoria para descargar." });
           return;
         }
         try {
           const wavBlob = encodeWAV(accumulatedBuffers, 24000);
-          const dataUrl = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => {
-              if (reader.result) resolve(reader.result);
-              else reject(new Error('FileReader no produjo resultado'));
-            };
-            reader.onerror = () => reject(reader.error || new Error('Error al leer blob'));
-            reader.readAsDataURL(wavBlob);
+          await saveAudioBlob('latest_wav_audio', wavBlob, { format: 'wav' });
+          sendResponse({
+            success: true,
+            storageKey: 'latest_wav_audio',
+            format: 'wav',
+            size: wavBlob.size
           });
-          sendResponse({ success: true, dataUrl, format: 'wav', size: wavBlob.size });
         } catch (err) {
           console.error('Error generando archivo WAV:', err);
           sendResponse({ error: `Error preparando archivo WAV: ${err.message}` });

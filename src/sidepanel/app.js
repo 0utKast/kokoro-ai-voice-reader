@@ -6,6 +6,10 @@ import { KOKORO_VOICES, MESSAGE_TYPES, DEFAULT_SETTINGS } from '../shared/consta
 import { getSettings, saveSettings } from '../shared/storage.js';
 import { extractTextFromPDF } from '../shared/pdf-extractor.js';
 import { normalizeTextForSpeech } from '../shared/audio-utils.js';
+import { getAudioBlob, clearAudioBlobs } from '../shared/audio-storage.js';
+
+// Document & Audio state
+let currentDocumentTitle = '';
 
 // DOM Elements
 const hardwareBadge = document.getElementById('hardware-badge');
@@ -383,6 +387,7 @@ function setupEventListeners() {
             modelProgressBar.style.width = `${Math.round((curr / total) * 100)}%`;
           });
           if (pdfText && pdfText.length > 0) {
+            currentDocumentTitle = tab.title ? tab.title.replace(/\.pdf$/i, '') : 'documento_pdf';
             textInput.value = pdfText;
             modelStatusText.textContent = '✓ Texto del PDF extraído correctamente.';
             modelPercentText.textContent = '100%';
@@ -433,6 +438,7 @@ function setupEventListeners() {
       }
 
       if (text && text.length > 0) {
+        currentDocumentTitle = tab.title ? tab.title.slice(0, 40) : 'articulo_web';
         textInput.value = normalizeTextForSpeech(text);
         const originalHTML = btnExtractArticle.innerHTML;
         btnExtractArticle.textContent = '✓ Capturado';
@@ -499,6 +505,7 @@ function setupEventListeners() {
           modelProgressBar.style.width = `${Math.round((page / total) * 100)}%`;
         });
         if (extracted && extracted.trim()) {
+          currentDocumentTitle = file.name.replace(/\.[^/.]+$/, '');
           textInput.value = normalizeTextForSpeech(extracted);
           modelStatusText.textContent = `✓ PDF cargado: ${file.name}`;
           modelPercentText.textContent = '100%';
@@ -509,6 +516,7 @@ function setupEventListeners() {
           modelPercentText.textContent = '⚠️';
         }
       } else {
+        currentDocumentTitle = file.name.replace(/\.[^/.]+$/, '');
         const rawText = await file.text();
         textInput.value = normalizeTextForSpeech(rawText);
         modelStatusText.textContent = `✓ Archivo cargado: ${file.name}`;
@@ -528,6 +536,8 @@ function setupEventListeners() {
     stopPlayback();
     textInput.value = '';
     textInput.focus();
+    currentDocumentTitle = '';
+    clearAudioBlobs().catch(() => {});
     isConversionComplete = false;
     totalExpectedChunks = 0;
     btnDownloadAudio.disabled = true;
@@ -560,6 +570,7 @@ function setupEventListeners() {
     try {
       await chrome.runtime.sendMessage({ type: 'ENSURE_OFFSCREEN' }).catch(() => {});
       const res = await chrome.runtime.sendMessage({ type: 'DOWNLOAD_MP3' });
+
       if (res?.error) {
         modelProgressCard.classList.remove('hidden');
         modelStatusText.textContent = res.error;
@@ -569,48 +580,86 @@ function setupEventListeners() {
         return;
       }
 
-      if (res?.dataUrl) {
-        const ext = res.format === 'wav' ? 'wav' : 'mp3';
-        const filename = `kokoro-speech-${Date.now()}.${ext}`;
+      let blob = null;
+      const ext = res?.format === 'wav' ? 'wav' : 'mp3';
 
-        // 1. Try Chrome native downloads API (highest reliability in extensions)
-        if (chrome.downloads && chrome.downloads.download) {
-          try {
-            await chrome.downloads.download({
-              url: res.dataUrl,
-              filename: filename,
-              saveAs: false
-            });
-            if (btnDownloadText) btnDownloadText.textContent = '✓ Descargado';
-            setTimeout(() => {
-              if (btnDownloadText) btnDownloadText.textContent = originalBtnText;
-              btnDownloadAudio.disabled = false;
-            }, 2500);
-            return;
-          } catch (dlErr) {
-            console.warn('chrome.downloads API fallo, usando fallback DOM:', dlErr);
-          }
+      // 1. Retrieve Blob directly from IndexedDB (zero IPC size restrictions!)
+      if (res?.storageKey) {
+        const record = await getAudioBlob(res.storageKey);
+        blob = record?.blob || null;
+      }
+
+      // 2. Backward-compatibility fallback if dataUrl was returned
+      if (!blob && res?.dataUrl) {
+        try {
+          const resp = await fetch(res.dataUrl);
+          blob = await resp.blob();
+        } catch (fetchErr) {
+          console.warn('Fallback dataUrl fetch failed:', fetchErr);
         }
+      }
 
-        // 2. Fallback: DOM anchor attached to document body
+      if (!blob || blob.size === 0) {
+        throw new Error('No se pudo recuperar el archivo de audio generado.');
+      }
+
+      // Create clean filename based on book/document title
+      const safeTitle = (currentDocumentTitle || 'kokoro-audio')
+        .replace(/[/\\?%*:|"<>]/g, '-')
+        .replace(/\s+/g, '_')
+        .slice(0, 50);
+      const filename = `${safeTitle}.${ext}`;
+      const fileSizeMB = (blob.size / 1024 / 1024).toFixed(1);
+
+      // Create Object URL for the blob
+      const blobUrl = URL.createObjectURL(blob);
+      let downloadTriggered = false;
+
+      // Primary download strategy: DOM anchor in sidepanel
+      // Standard browser DOM behavior; works with gigabyte-scale Blobs with zero IPC/URL length limits
+      try {
         const a = document.createElement('a');
         a.style.display = 'none';
-        a.href = res.dataUrl;
+        a.href = blobUrl;
         a.download = filename;
         document.body.appendChild(a);
         a.click();
+        downloadTriggered = true;
         setTimeout(() => {
           if (a.parentNode) a.parentNode.removeChild(a);
-        }, 1500);
-
-        if (btnDownloadText) btnDownloadText.textContent = '✓ Descargado';
-        setTimeout(() => {
-          if (btnDownloadText) btnDownloadText.textContent = originalBtnText;
-          btnDownloadAudio.disabled = false;
-        }, 2500);
-      } else {
-        throw new Error('No se recibió la URL de datos del archivo.');
+        }, 2000);
+      } catch (domErr) {
+        console.warn('DOM anchor download fallo, probando chrome.downloads:', domErr);
       }
+
+      // Secondary download strategy: chrome.downloads API
+      if (!downloadTriggered && chrome.downloads && chrome.downloads.download) {
+        try {
+          await chrome.downloads.download({
+            url: blobUrl,
+            filename: filename,
+            saveAs: false
+          });
+          downloadTriggered = true;
+        } catch (dlErr) {
+          console.warn('chrome.downloads API fallo:', dlErr);
+        }
+      }
+
+      if (!downloadTriggered) {
+        throw new Error('No se pudo iniciar la descarga del archivo en el navegador.');
+      }
+
+      // Clean up object URL after safe window
+      setTimeout(() => {
+        URL.revokeObjectURL(blobUrl);
+      }, 60000);
+
+      if (btnDownloadText) btnDownloadText.textContent = `✓ MP3 (${fileSizeMB} MB)`;
+      setTimeout(() => {
+        if (btnDownloadText) btnDownloadText.textContent = originalBtnText;
+        btnDownloadAudio.disabled = false;
+      }, 3500);
     } catch (err) {
       console.error('Error al descargar audio:', err);
       modelProgressCard.classList.remove('hidden');

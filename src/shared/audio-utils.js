@@ -222,6 +222,7 @@ export function trimAudioSilence(pcm, sampleRate = 24000, maxLeadMs = 20, maxTra
 /**
  * Encodes Float32Array PCM audio chunks into a valid 16-bit Mono WAV Blob.
  * Default sample rate for Kokoro is 24000 Hz.
+ * Streams samples directly into the DataView buffer to avoid intermediate Float32Array allocation.
  */
 export function encodeWAV(audioBuffers, sampleRate = 24000) {
   // Calculate total length
@@ -230,16 +231,12 @@ export function encodeWAV(audioBuffers, sampleRate = 24000) {
     totalLength += buf.length;
   }
 
-  // Merge into single Float32Array
-  const merged = new Float32Array(totalLength);
-  let offset = 0;
-  for (const buf of audioBuffers) {
-    merged.set(buf, offset);
-    offset += buf.length;
+  if (totalLength === 0) {
+    throw new Error('No hay muestras de audio para codificar a WAV.');
   }
 
-  // Create WAV header & 16-bit PCM buffer
-  const buffer = new ArrayBuffer(44 + merged.length * 2);
+  // Create WAV header & 16-bit PCM buffer directly without merging intermediate Float32 arrays
+  const buffer = new ArrayBuffer(44 + totalLength * 2);
   const view = new DataView(buffer);
 
   // Helper to write ASCII string
@@ -251,7 +248,7 @@ export function encodeWAV(audioBuffers, sampleRate = 24000) {
 
   // RIFF chunk descriptor
   writeString(view, 0, 'RIFF');
-  view.setUint32(4, 36 + merged.length * 2, true); // File length - 8
+  view.setUint32(4, 36 + totalLength * 2, true); // File length - 8
   writeString(view, 8, 'WAVE');
 
   // fmt sub-chunk
@@ -266,19 +263,95 @@ export function encodeWAV(audioBuffers, sampleRate = 24000) {
 
   // data sub-chunk
   writeString(view, 36, 'data');
-  view.setUint32(40, merged.length * 2, true); // Subchunk2Size
+  view.setUint32(40, totalLength * 2, true); // Subchunk2Size
 
-  // Write 16-bit PCM samples
+  // Write 16-bit PCM samples directly from chunks
   let sampleIndex = 44;
-  for (let i = 0; i < merged.length; i++) {
-    // Clamp to [-1.0, 1.0]
-    let s = Math.max(-1, Math.min(1, merged[i]));
-    // Convert to 16-bit signed integer
-    view.setInt16(sampleIndex, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-    sampleIndex += 2;
+  for (const buf of audioBuffers) {
+    for (let i = 0; i < buf.length; i++) {
+      let s = Math.max(-1, Math.min(1, buf[i]));
+      view.setInt16(sampleIndex, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+      sampleIndex += 2;
+    }
   }
 
   return new Blob([view], { type: 'audio/wav' });
+}
+
+/**
+ * Incremental, memory-efficient streaming MP3 encoder.
+ * Encodes audio on-the-fly chunk by chunk as Kokoro synthesizes each sentence,
+ * without ever allocating giant contiguous arrays or causing V8 heap exhaustion.
+ */
+export class ProgressiveMp3Encoder {
+  constructor(sampleRate = 24000, kbps = 64) {
+    const lame = globalThis.lamejs || (typeof window !== 'undefined' ? window.lamejs : null);
+    if (!lame || !lame.Mp3Encoder) {
+      throw new Error('El codificador MP3 (lamejs) no está disponible en este entorno.');
+    }
+    this.sampleRate = sampleRate;
+    this.kbps = kbps;
+    this.encoder = new lame.Mp3Encoder(1, sampleRate, kbps);
+    this.mp3Chunks = [];
+    this.totalSamples = 0;
+    this.isFlushed = false;
+  }
+
+  /**
+   * Feeds a Float32Array PCM chunk to the MP3 encoder.
+   * Converts in small slices (11,520 samples, ~23KB) to eliminate large memory allocations.
+   * @param {Float32Array} float32Array
+   */
+  feed(float32Array) {
+    if (!float32Array || float32Array.length === 0 || this.isFlushed) return;
+
+    const len = float32Array.length;
+    this.totalSamples += len;
+
+    const SLICE_SIZE = 11520;
+    for (let offset = 0; offset < len; offset += SLICE_SIZE) {
+      const sliceLen = Math.min(SLICE_SIZE, len - offset);
+      const int16Slice = new Int16Array(sliceLen);
+      for (let i = 0; i < sliceLen; i++) {
+        let s = Math.max(-1, Math.min(1, float32Array[offset + i]));
+        int16Slice[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+
+      const mp3buf = this.encoder.encodeBuffer(int16Slice);
+      if (mp3buf && mp3buf.length > 0) {
+        this.mp3Chunks.push(mp3buf);
+      }
+    }
+  }
+
+  /**
+   * Flushes encoder and returns final MP3 Blob.
+   * @returns {Blob}
+   */
+  finish() {
+    if (!this.isFlushed) {
+      const flushBuf = this.encoder.flush();
+      if (flushBuf && flushBuf.length > 0) {
+        this.mp3Chunks.push(flushBuf);
+      }
+      this.isFlushed = true;
+    }
+    return new Blob(this.mp3Chunks, { type: 'audio/mp3' });
+  }
+
+  getBlob() {
+    return this.finish();
+  }
+
+  get durationSeconds() {
+    return this.totalSamples / this.sampleRate;
+  }
+
+  get size() {
+    let bytes = 0;
+    for (const c of this.mp3Chunks) bytes += c.length;
+    return bytes;
+  }
 }
 
 /**
@@ -286,52 +359,24 @@ export function encodeWAV(audioBuffers, sampleRate = 24000) {
  * Kokoro default sample rate is 24000 Hz. Mono speech at 64kbps provides
  * stellar acoustic clarity with ~82% smaller file size than uncompressed WAV,
  * ideal for long books and full audio documents.
+ * 
+ * Uses ProgressiveMp3Encoder streaming to prevent Out-Of-Memory and RangeError crashes.
  */
 export function encodeMP3(audioBuffers, sampleRate = 24000, kbps = 64) {
-  const lame = globalThis.lamejs || (typeof window !== 'undefined' ? window.lamejs : null);
-  if (!lame || !lame.Mp3Encoder) {
-    throw new Error('El codificador MP3 (lamejs) no está disponible en este entorno.');
-  }
-
-  // Calculate total length
-  let totalLength = 0;
-  for (const buf of audioBuffers) {
-    totalLength += buf.length;
-  }
-
-  if (totalLength === 0) {
+  if (!audioBuffers || audioBuffers.length === 0) {
     throw new Error('No hay muestras de audio para codificar a MP3.');
   }
 
-  // Merge into single Int16Array
-  const samples = new Int16Array(totalLength);
-  let offset = 0;
+  const encoder = new ProgressiveMp3Encoder(sampleRate, kbps);
   for (const buf of audioBuffers) {
-    for (let i = 0; i < buf.length; i++) {
-      let s = Math.max(-1, Math.min(1, buf[i]));
-      samples[offset + i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-    }
-    offset += buf.length;
+    encoder.feed(buf);
   }
 
-  // MP3 encoder for mono channel
-  const mp3encoder = new lame.Mp3Encoder(1, sampleRate, kbps);
-  const mp3Data = [];
-  const blockSize = 1152;
-
-  for (let i = 0; i < samples.length; i += blockSize) {
-    const chunk = samples.subarray(i, i + blockSize);
-    const mp3buf = mp3encoder.encodeBuffer(chunk);
-    if (mp3buf.length > 0) {
-      mp3Data.push(mp3buf);
-    }
+  if (encoder.totalSamples === 0) {
+    throw new Error('No hay muestras de audio para codificar a MP3.');
   }
 
-  const flushBuf = mp3encoder.flush();
-  if (flushBuf.length > 0) {
-    mp3Data.push(flushBuf);
-  }
-
-  return new Blob(mp3Data, { type: 'audio/mp3' });
+  return encoder.finish();
 }
+
 

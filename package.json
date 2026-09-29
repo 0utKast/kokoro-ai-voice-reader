@@ -6,7 +6,7 @@
   "scripts": {
     "icons": "python3 scripts/generate_icons.py",
     "package": "rm -f dist/kokoro-ai-extension.zip && zip -r dist/kokoro-ai-extension.zip manifest.json icons src -x '*.DS_Store*'",
-    "test": "echo \"Tests completed.\""
+    "test": "node tests/test-mp3-download.js"
   },
   "keywords": [
     "chrome-extension",
