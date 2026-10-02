@@ -34,16 +34,18 @@ body {
   color: var(--text-main);
   font-size: 13px;
   line-height: 1.5;
-  height: 100vh;
-  overflow: hidden;
+  min-height: 100vh;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .app-container {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  min-height: 100vh;
   padding: 14px;
   gap: 12px;
+  box-sizing: border-box;
 }
 
 /* Header */
@@ -53,6 +55,7 @@ body {
   justify-content: space-between;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
 }
 
 .brand {
@@ -171,6 +174,7 @@ body {
   display: flex;
   gap: 6px;
   align-items: center;
+  flex-shrink: 0;
 }
 
 .btn {
@@ -210,9 +214,9 @@ body {
 
 /* Reading & Karaoke Area */
 .reading-area {
-  flex: 1;
+  flex: 1 1 auto;
   position: relative;
-  min-height: 140px;
+  min-height: 100px;
   overflow: hidden;
   border-radius: var(--radius-md);
 }
@@ -286,6 +290,7 @@ body {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
+  flex-shrink: 0;
 }
 .status-info {
   display: flex;
@@ -339,6 +344,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  flex-shrink: 0;
 }
 
 .primary-controls {
@@ -515,4 +521,24 @@ body {
 .hidden {
   display: none !important;
 }
+
+/* Subtle modern scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
 

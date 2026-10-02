@@ -64,18 +64,18 @@ En la parte inferior encontramos los controles principales:
 ### [04:30 - 06:15] Bloque 4: Modos de Lectura: Artículos Web, PDFs y Modo Karaoke
 
 **[EN PANTALLA]:**
-*Demostración 1: Navegando por un artículo de prensa o blog técnico. Clic en el botón "Capturar Selección / PDF". El texto limpio aparece al instante en el editor y arranca la voz.*
+*Demostración 1: Navegando por un artículo o documentación web. El usuario selecciona un párrafo o sección con el ratón y pulsa "Capturar Selección" en el panel (o clic derecho / atajo). El texto limpio aparece al instante en el editor y arranca la voz.*
 *Demostración 2: El modo Karaoke ilumina en azul/cian cada frase mientras suena el audio.*
 
 **[LOCUCIÓN]:**
 Vamos a ponerla a prueba en situaciones reales.
 
-Imaginad que estáis en un artículo largo de un blog o un periódico digital lleno de anuncios, menús y comentarios. En lugar de copiar y pegar a mano, simplemente pulsamos el botón **"Capturar Selección / PDF"**. La extensión ejecuta un algoritmo de extracción inteligente que limpia todo el ruido publicitario y extrae únicamente el cuerpo del artículo y sus titulares principales.
+Imaginad que estáis en un artículo de un blog, un periódico digital o una página de documentación técnica. La mejor forma de leerla, y la más limpia, es el control directo: simplemente seleccionáis con el ratón el párrafo o la sección exacta que queréis escuchar. Al pulsar el botón de **"Capturar Selección"** en el panel lateral, el texto se traslada de inmediato al editor, limpio, sin anuncios y sin elementos extraños.
 
 Al pulsar **Play**, ocurre la magia:
 El editor de texto da paso automáticamente a nuestro **Modo Karaoke Sincronizado**. Cada frase que el modelo neuronal va pronunciando se resalta en pantalla con un desplazamiento suave. Si estás estudiando, repasando un temario o aprendiendo un idioma, la sincronización entre el ojo y el oído es perfecta.
 
-Y si tenéis un libro o documento PDF, ya sea en una pestaña del navegador o en un archivo local en vuestro disco, basta con arrastrarlo directamente sobre el panel lateral o pulsar **"Cargar PDF / TXT"**. La extensión procesa el documento, reconstruye los saltos de línea para que la entonación no se corte a mitad de frase y comienza la lectura de inmediato.
+Y si lo que tenéis entre manos es un libro o un documento PDF completo, basta con arrastrarlo directamente sobre el panel lateral o pulsar **"Cargar PDF / TXT"**. La extensión procesa el documento, reconstruye los saltos de línea para que la entonación no se corte a mitad de frase y comienza la lectura de inmediato.
 
 ---
 

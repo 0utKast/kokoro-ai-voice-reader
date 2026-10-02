@@ -1,6 +1,6 @@
 {
   "name": "kokoro-webgpu-chrome-extension",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "description": "Chrome Extension (Manifest V3) for local neural text-to-speech with Kokoro-82M and WebGPU acceleration.",
   "type": "module",
   "scripts": {
