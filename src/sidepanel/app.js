@@ -220,30 +220,70 @@ function updateConversionUI(info) {
 }
 
 function renderKaraokeChunks(chunks) {
+  if (!Array.isArray(chunks) || chunks.length === 0) {
+    karaokeChunksContainer.innerHTML = '';
+    currentChunks = [];
+    return;
+  }
+
+  const existingCount = karaokeChunksContainer.children.length;
+
+  // Si es una actualización incremental de la sesión actual (añadiendo nuevas frases generadas)
+  if (existingCount > 0 && chunks.length >= existingCount && currentChunks[0] === chunks[0]) {
+    if (chunks.length > existingCount) {
+      const fragment = document.createDocumentFragment();
+      for (let idx = existingCount; idx < chunks.length; idx++) {
+        const p = document.createElement('div');
+        p.className = 'karaoke-chunk';
+        p.dataset.index = idx;
+        p.textContent = chunks[idx];
+        fragment.appendChild(p);
+      }
+      karaokeChunksContainer.appendChild(fragment);
+    }
+    currentChunks = chunks;
+
+    // Garantizar que la frase actualmente en reproducción mantenga el resaltado sin parpadeos
+    if (typeof activeChunkIndex === 'number' && karaokeChunksContainer.children[activeChunkIndex]) {
+      const activeEl = karaokeChunksContainer.children[activeChunkIndex];
+      if (!activeEl.classList.contains('active-chunk')) {
+        activeEl.classList.add('active-chunk');
+      }
+    }
+    return;
+  }
+
+  // Renderizado completo (nueva reproducción o cambio de documento)
   karaokeChunksContainer.innerHTML = '';
   currentChunks = chunks;
 
+  const fragment = document.createDocumentFragment();
   chunks.forEach((chunkText, idx) => {
     const p = document.createElement('div');
-    p.className = 'karaoke-chunk';
+    p.className = 'karaoke-chunk' + (idx === activeChunkIndex ? ' active-chunk' : '');
     p.dataset.index = idx;
     p.textContent = chunkText;
-    karaokeChunksContainer.appendChild(p);
+    fragment.appendChild(p);
   });
+  karaokeChunksContainer.appendChild(fragment);
+
+  const total = totalExpectedChunks || currentChunks.length || 1;
+  currentChunkBadge.textContent = `🔊 Frase ${activeChunkIndex + 1} de ${total}`;
 }
 
 function setActiveKaraokeChunk(index) {
   activeChunkIndex = index;
-  const chunkElements = karaokeChunksContainer.querySelectorAll('.karaoke-chunk');
+  const chunkElements = karaokeChunksContainer.children;
 
-  chunkElements.forEach((el, idx) => {
+  for (let idx = 0; idx < chunkElements.length; idx++) {
+    const el = chunkElements[idx];
     if (idx === index) {
       el.classList.add('active-chunk');
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     } else {
       el.classList.remove('active-chunk');
     }
-  });
+  }
 
   const total = totalExpectedChunks || currentChunks.length || 1;
   currentChunkBadge.textContent = `🔊 Frase ${index + 1} de ${total}`;
@@ -261,6 +301,9 @@ async function startPlayback() {
 
   isConversionComplete = false;
   totalExpectedChunks = 0;
+  activeChunkIndex = 0;
+  currentChunks = [];
+  karaokeChunksContainer.innerHTML = '';
   btnDownloadAudio.disabled = true;
   btnDownloadAudio.classList.remove('btn-download-ready');
   if (btnDownloadText) btnDownloadText.textContent = 'Descargar MP3';
