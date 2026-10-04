@@ -356,13 +356,20 @@ async function stopPlayback() {
 // 4. Setup Event Listeners
 function setupEventListeners() {
   // Play/Pause button
+  let isTogglingPlayback = false;
   btnPlayPause.addEventListener('click', async () => {
-    if (!isPlaying) {
-      await startPlayback();
-    } else if (isPlaying && !isPaused) {
-      await pausePlayback();
-    } else {
-      await resumePlayback();
+    if (isTogglingPlayback) return;
+    isTogglingPlayback = true;
+    try {
+      if (!isPlaying) {
+        await startPlayback();
+      } else if (isPlaying && !isPaused) {
+        await pausePlayback();
+      } else {
+        await resumePlayback();
+      }
+    } finally {
+      isTogglingPlayback = false;
     }
   });
 

@@ -40,7 +40,9 @@ let isConversionComplete = false;
 let totalExpectedChunks = 0;
 let convertedChunks = 0;
 let currentChunkTexts = [];
-let currentActiveChunkIndex = 0;
+let currentActiveChunkIndex = -1;
+let scheduledChunks = [];
+let playbackMonitorInterval = null;
 
 // 1. Initialize Audio Context
 function getAudioContext() {
@@ -52,7 +54,7 @@ function getAudioContext() {
     gainNode.connect(audioCtx.destination);
   }
   if (audioCtx.state === 'suspended' && !isPaused) {
-    audioCtx.resume();
+    audioCtx.resume().catch(() => {});
   }
   return audioCtx;
 }
@@ -169,14 +171,22 @@ function stopAudioPlayback() {
   nextStartTime = 0;
   totalScheduledChunks = 0;
   completedChunks = 0;
+  currentActiveChunkIndex = -1;
+  scheduledChunks = [];
+  stopPlaybackMonitor();
 
   for (const src of activeSources) {
     try {
+      src.onended = null;
       src.stop(0);
       src.disconnect();
     } catch {}
   }
   activeSources = [];
+
+  if (audioCtx && audioCtx.state === 'suspended') {
+    audioCtx.resume().catch(() => {});
+  }
 
   chrome.runtime.sendMessage({
     type: MESSAGE_TYPES.PLAYBACK_STATE,
@@ -199,6 +209,9 @@ async function playText(text, options = {}) {
   currentVolume = options.volume ?? currentVolume;
 
   const ctx = getAudioContext();
+  if (ctx.state === 'suspended') {
+    await ctx.resume().catch(() => {});
+  }
   if (gainNode) {
     gainNode.gain.value = currentVolume;
   }
@@ -208,7 +221,8 @@ async function playText(text, options = {}) {
   accumulatedBuffers = [];
   progressiveMp3Encoder = new ProgressiveMp3Encoder(24000, 64);
   currentChunkTexts = [];
-  currentActiveChunkIndex = 0;
+  currentActiveChunkIndex = -1;
+  scheduledChunks = [];
   nextStartTime = ctx.currentTime + 0.05;
   totalScheduledChunks = 0;
   completedChunks = 0;
@@ -278,8 +292,8 @@ async function playText(text, options = {}) {
       // Update side panel with streaming audio and live conversion progress
       chrome.runtime.sendMessage({
         type: MESSAGE_TYPES.PLAYBACK_STATE,
-        isPlaying: true,
-        isPaused: false,
+        isPlaying: isPlaying,
+        isPaused: isPaused,
         totalChunks: totalScheduledChunks,
         chunks: chunkTexts,
         conversionProgress: conversionPct,
@@ -348,6 +362,46 @@ async function playText(text, options = {}) {
   }
 }
 
+function startPlaybackMonitor() {
+  if (playbackMonitorInterval) return;
+
+  playbackMonitorInterval = setInterval(() => {
+    if (!isPlaying) {
+      stopPlaybackMonitor();
+      return;
+    }
+
+    if (isPaused || !audioCtx || audioCtx.state !== 'running') {
+      return;
+    }
+
+    const t = audioCtx.currentTime;
+    const startIndex = Math.max(0, currentActiveChunkIndex);
+    for (let i = startIndex; i < scheduledChunks.length; i++) {
+      const chunk = scheduledChunks[i];
+      if (t >= chunk.startTime && t < chunk.endTime) {
+        if (currentActiveChunkIndex !== chunk.chunkIndex) {
+          currentActiveChunkIndex = chunk.chunkIndex;
+          chrome.runtime.sendMessage({
+            type: MESSAGE_TYPES.CURRENT_CHUNK_INDEX,
+            chunkIndex: chunk.chunkIndex,
+            text: chunk.text,
+            duration: chunk.duration
+          }).catch(() => {});
+        }
+        break;
+      }
+    }
+  }, 40);
+}
+
+function stopPlaybackMonitor() {
+  if (playbackMonitorInterval) {
+    clearInterval(playbackMonitorInterval);
+    playbackMonitorInterval = null;
+  }
+}
+
 function scheduleChunkPlayback(audioBuffer, chunkIndex, text, isParagraphEnd = false) {
   const ctx = getAudioContext();
   const source = ctx.createBufferSource();
@@ -359,24 +413,32 @@ function scheduleChunkPlayback(audioBuffer, chunkIndex, text, isParagraphEnd = f
   const duration = audioBuffer.duration;
   const startTime = Math.max(ctx.currentTime + 0.05, nextStartTime);
   source.start(startTime);
+  const endTime = startTime + duration;
   // Add a slight natural paragraph breath (200ms) only when paragraph ends; within paragraphs keep it seamless (15ms)
-  nextStartTime = startTime + duration + (isParagraphEnd ? 0.20 : 0.015);
+  nextStartTime = endTime + (isParagraphEnd ? 0.20 : 0.015);
 
   activeSources.push(source);
 
-  // Notify UI when this specific chunk starts playing
-  const delayMs = Math.max(0, (startTime - ctx.currentTime) * 1000);
-  setTimeout(() => {
-    if (isPlaying && !abortGeneration) {
-      currentActiveChunkIndex = chunkIndex;
-      chrome.runtime.sendMessage({
-        type: MESSAGE_TYPES.CURRENT_CHUNK_INDEX,
-        chunkIndex: chunkIndex,
-        text: text,
-        duration: duration
-      }).catch(() => {});
-    }
-  }, delayMs);
+  scheduledChunks.push({
+    chunkIndex,
+    startTime,
+    endTime,
+    duration,
+    text
+  });
+
+  // Highlight initial chunk immediately if playback is just starting
+  if (chunkIndex === 0 && currentActiveChunkIndex === -1) {
+    currentActiveChunkIndex = 0;
+    chrome.runtime.sendMessage({
+      type: MESSAGE_TYPES.CURRENT_CHUNK_INDEX,
+      chunkIndex: 0,
+      text: text,
+      duration: duration
+    }).catch(() => {});
+  }
+
+  startPlaybackMonitor();
 
   source.onended = () => {
     completedChunks++;
@@ -385,6 +447,8 @@ function scheduleChunkPlayback(audioBuffer, chunkIndex, text, isParagraphEnd = f
 
     if (isGenerationDone && completedChunks >= totalScheduledChunks && activeSources.length === 0) {
       isPlaying = false;
+      isPaused = false;
+      stopPlaybackMonitor();
       chrome.runtime.sendMessage({
         type: MESSAGE_TYPES.PLAYBACK_STATE,
         isPlaying: false,
@@ -452,29 +516,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case MESSAGE_TYPES.PAUSE_PLAYBACK: {
+        isPaused = true;
         if (audioCtx && audioCtx.state === 'running') {
           await audioCtx.suspend();
-          isPaused = true;
-          chrome.runtime.sendMessage({
-            type: MESSAGE_TYPES.PLAYBACK_STATE,
-            isPlaying: true,
-            isPaused: true
-          }).catch(() => {});
         }
+        chrome.runtime.sendMessage({
+          type: MESSAGE_TYPES.PLAYBACK_STATE,
+          isPlaying: isPlaying,
+          isPaused: true
+        }).catch(() => {});
         sendResponse({ success: true });
         break;
       }
 
       case MESSAGE_TYPES.RESUME_PLAYBACK: {
+        isPaused = false;
         if (audioCtx && audioCtx.state === 'suspended') {
           await audioCtx.resume();
-          isPaused = false;
-          chrome.runtime.sendMessage({
-            type: MESSAGE_TYPES.PLAYBACK_STATE,
-            isPlaying: true,
-            isPaused: false
-          }).catch(() => {});
         }
+        chrome.runtime.sendMessage({
+          type: MESSAGE_TYPES.PLAYBACK_STATE,
+          isPlaying: isPlaying,
+          isPaused: false
+        }).catch(() => {});
         sendResponse({ success: true });
         break;
       }
