@@ -269,6 +269,28 @@ function renderKaraokeChunks(chunks) {
 
   const total = totalExpectedChunks || currentChunks.length || 1;
   currentChunkBadge.textContent = `🔊 Frase ${activeChunkIndex + 1} de ${total}`;
+
+  if (typeof activeChunkIndex === 'number' && karaokeChunksContainer.children[activeChunkIndex]) {
+    scrollChunkIntoView(karaokeChunksContainer.children[activeChunkIndex]);
+  }
+}
+
+function scrollChunkIntoView(el) {
+  if (!el) return;
+  if (karaokeDisplay && karaokeDisplay.clientHeight > 0) {
+    const containerRect = karaokeDisplay.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    const relativeTop = elRect.top - containerRect.top + karaokeDisplay.scrollTop;
+    const targetScrollTop = relativeTop - (karaokeDisplay.clientHeight / 2) + (elRect.height / 2);
+    karaokeDisplay.scrollTo({
+      top: Math.max(0, targetScrollTop),
+      behavior: 'smooth'
+    });
+  } else {
+    try {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } catch {}
+  }
 }
 
 function setActiveKaraokeChunk(index) {
@@ -279,7 +301,7 @@ function setActiveKaraokeChunk(index) {
     const el = chunkElements[idx];
     if (idx === index) {
       el.classList.add('active-chunk');
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      scrollChunkIntoView(el);
     } else {
       el.classList.remove('active-chunk');
     }

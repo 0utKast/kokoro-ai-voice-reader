@@ -93,77 +93,80 @@
       </div>
     </main>
 
-    <!-- Playback Status Bar -->
-    <div id="playback-status-bar" class="status-bar hidden">
-      <div class="status-info">
-        <span id="current-chunk-badge" class="chunk-counter">🔊 Frase 1 de 1</span>
-        <span id="conversion-status-badge" class="conversion-indicator">⚡ Sintetizando: 0%</span>
-      </div>
-      <div class="conversion-progress-track" title="Progreso de conversión neuronal a audio">
-        <div id="conversion-progress-fill" class="conversion-progress-bar" style="width: 0%;"></div>
-      </div>
-    </div>
-
-    <!-- Audio Player Controls -->
-    <footer class="player-controls">
-      <!-- Control Buttons -->
-      <div class="controls-row primary-controls">
-        <button id="btn-prev-chunk" class="btn-icon" title="Frase anterior">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polygon points="19 20 9 12 19 4 19 20"></polygon>
-            <line x1="5" y1="19" x2="5" y2="5"></line>
-          </svg>
-        </button>
-
-        <button id="btn-play-pause" class="btn-play" title="Reproducir">
-          <svg id="icon-play" width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
-            <polygon points="5 3 19 12 5 21 5 3"></polygon>
-          </svg>
-          <svg id="icon-pause" class="hidden" width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
-            <rect x="6" y="4" width="4" height="16"></rect>
-            <rect x="14" y="4" width="4" height="16"></rect>
-          </svg>
-        </button>
-
-        <button id="btn-stop" class="btn-icon" title="Detener">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-            <rect x="5" y="5" width="14" height="14"></rect>
-          </svg>
-        </button>
-
-        <button id="btn-next-chunk" class="btn-icon" title="Siguiente frase">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polygon points="5 4 15 12 5 20 5 4"></polygon>
-            <line x1="19" y1="5" x2="19" y2="19"></line>
-          </svg>
-        </button>
+    <!-- Fixed Bottom Controls Dock -->
+    <div class="bottom-dock">
+      <!-- Playback Status Bar -->
+      <div id="playback-status-bar" class="status-bar hidden">
+        <div class="status-info">
+          <span id="current-chunk-badge" class="chunk-counter">🔊 Frase 1 de 1</span>
+          <span id="conversion-status-badge" class="conversion-indicator">⚡ Sintetizando: 0%</span>
+        </div>
+        <div class="conversion-progress-track" title="Progreso de conversión neuronal a audio">
+          <div id="conversion-progress-fill" class="conversion-progress-bar" style="width: 0%;"></div>
+        </div>
       </div>
 
-      <!-- Settings Row: Voice & Speed -->
-      <div class="settings-grid">
-        <div class="setting-item">
-          <label for="voice-select">Voz Neuronal</label>
-          <select id="voice-select" class="form-select"></select>
+      <!-- Audio Player Controls -->
+      <footer class="player-controls">
+        <!-- Control Buttons -->
+        <div class="controls-row primary-controls">
+          <button id="btn-prev-chunk" class="btn-icon" title="Frase anterior">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="19 20 9 12 19 4 19 20"></polygon>
+              <line x1="5" y1="19" x2="5" y2="5"></line>
+            </svg>
+          </button>
+
+          <button id="btn-play-pause" class="btn-play" title="Reproducir">
+            <svg id="icon-play" width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+            <svg id="icon-pause" class="hidden" width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="6" y="4" width="4" height="16"></rect>
+              <rect x="14" y="4" width="4" height="16"></rect>
+            </svg>
+          </button>
+
+          <button id="btn-stop" class="btn-icon" title="Detener">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="5" y="5" width="14" height="14"></rect>
+            </svg>
+          </button>
+
+          <button id="btn-next-chunk" class="btn-icon" title="Siguiente frase">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="5 4 15 12 5 20 5 4"></polygon>
+              <line x1="19" y1="5" x2="19" y2="19"></line>
+            </svg>
+          </button>
         </div>
 
-        <div class="setting-item speed-item">
-          <div class="setting-label-row">
-            <label for="speed-slider">Velocidad</label>
-            <span id="speed-value">1.0x</span>
+        <!-- Settings Row: Voice & Speed -->
+        <div class="settings-grid">
+          <div class="setting-item">
+            <label for="voice-select">Voz Neuronal</label>
+            <select id="voice-select" class="form-select"></select>
           </div>
-          <input type="range" id="speed-slider" min="0.75" max="1.75" step="0.05" value="1.0" class="form-range">
-        </div>
-      </div>
 
-      <!-- Quick Preferences / Toggles -->
-      <div class="settings-options">
-        <label class="toggle-option" title="Mostrar botón flotante 'Leer con Kokoro' al seleccionar texto en páginas web">
-          <input type="checkbox" id="toggle-selection-pill" class="toggle-input">
-          <span class="toggle-switch"></span>
-          <span class="toggle-text">Globo flotante al subrayar texto</span>
-        </label>
-      </div>
-    </footer>
+          <div class="setting-item speed-item">
+            <div class="setting-label-row">
+              <label for="speed-slider">Velocidad</label>
+              <span id="speed-value">1.0x</span>
+            </div>
+            <input type="range" id="speed-slider" min="0.75" max="1.75" step="0.05" value="1.0" class="form-range">
+          </div>
+        </div>
+
+        <!-- Quick Preferences / Toggles -->
+        <div class="settings-options">
+          <label class="toggle-option" title="Mostrar botón flotante 'Leer con Kokoro' al seleccionar texto en páginas web">
+            <input type="checkbox" id="toggle-selection-pill" class="toggle-input">
+            <span class="toggle-switch"></span>
+            <span class="toggle-text">Globo flotante al subrayar texto</span>
+          </label>
+        </div>
+      </footer>
+    </div>
   </div>
 
   <script type="module" src="app.js"></script>

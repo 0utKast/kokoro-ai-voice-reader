@@ -28,24 +28,32 @@
   padding: 0;
 }
 
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
 body {
   font-family: var(--font-family);
   background-color: var(--bg-primary);
   color: var(--text-main);
   font-size: 13px;
   line-height: 1.5;
-  min-height: 100vh;
-  overflow-x: hidden;
-  overflow-y: auto;
+  width: 100%;
 }
 
 .app-container {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
-  padding: 14px;
-  gap: 12px;
+  height: 100vh;
+  height: 100dvh;
+  padding: 12px 14px;
+  gap: 10px;
   box-sizing: border-box;
+  overflow: hidden;
+  position: relative;
 }
 
 /* Header */
@@ -140,6 +148,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  flex-shrink: 0;
 }
 
 .progress-header {
@@ -214,16 +223,20 @@ body {
 
 /* Reading & Karaoke Area */
 .reading-area {
-  flex: 1 1 auto;
+  flex: 1 1 0px;
+  min-height: 0;
   position: relative;
-  min-height: 100px;
   overflow: hidden;
   border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
 }
 
 .text-editor {
   width: 100%;
   height: 100%;
+  min-height: 0;
+  flex: 1 1 auto;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
@@ -234,6 +247,8 @@ body {
   line-height: 1.6;
   resize: none;
   outline: none;
+  overflow-y: auto;
+  box-sizing: border-box;
 }
 .text-editor:focus {
   border-color: var(--border-focus);
@@ -243,12 +258,15 @@ body {
 .karaoke-container {
   width: 100%;
   height: 100%;
+  min-height: 0;
+  flex: 1 1 auto;
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   padding: 14px;
   overflow-y: auto;
   scroll-behavior: smooth;
+  box-sizing: border-box;
 }
 
 .chunks-flow {
@@ -277,6 +295,18 @@ body {
   border-left: 3px solid var(--accent-cyan);
   font-weight: 500;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+
+/* Bottom Controls Dock (Always Fixed at bottom) */
+.bottom-dock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-top: auto;
+  width: 100%;
+  position: relative;
+  z-index: 10;
 }
 
 /* Status Bar & Conversion Progress */
@@ -343,7 +373,7 @@ body {
   padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   flex-shrink: 0;
 }
 
