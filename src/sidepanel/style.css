@@ -361,7 +361,15 @@ body {
 }
 .btn-download-ready {
   color: #10b981 !important;
-  border-color: rgba(16, 185, 129, 0.4) !important;
+  border-color: rgba(16, 185, 129, 0.5) !important;
+  background: rgba(16, 185, 129, 0.08) !important;
+  cursor: pointer !important;
+  opacity: 1 !important;
+}
+.btn-download-ready:hover {
+  background: rgba(16, 185, 129, 0.18) !important;
+  border-color: #10b981 !important;
+  color: #34d399 !important;
 }
 
 /* Player Controls */

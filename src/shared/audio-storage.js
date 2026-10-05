@@ -70,11 +70,20 @@ export async function saveAudioBlob(id, blob, metadata = {}) {
 
     const req = store.put(record);
 
-    req.onsuccess = () => resolve(true);
     req.onerror = () => reject(req.error || new Error('Error al guardar audio Blob en IndexedDB'));
 
-    tx.oncomplete = () => db.close();
-    tx.onerror = () => reject(tx.error || new Error('Transacción fallida al guardar audio'));
+    tx.oncomplete = () => {
+      db.close();
+      resolve(true);
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error || new Error('Transacción fallida al guardar audio'));
+    };
+    tx.onabort = () => {
+      db.close();
+      reject(tx.error || new Error('Transacción abortada al guardar audio'));
+    };
   });
 }
 
@@ -86,19 +95,27 @@ export async function saveAudioBlob(id, blob, metadata = {}) {
 export async function getAudioBlob(id) {
   if (!id) return null;
 
-  const db = await openAudioDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readonly');
-    const store = tx.objectStore(STORE_NAME);
+  try {
+    const db = await openAudioDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
 
-    const req = store.get(id);
+      const req = store.get(id);
 
-    req.onsuccess = () => resolve(req.result || null);
-    req.onerror = () => reject(req.error || new Error('Error al recuperar audio Blob de IndexedDB'));
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error || new Error('Error al recuperar audio Blob de IndexedDB'));
 
-    tx.oncomplete = () => db.close();
-    tx.onerror = () => reject(tx.error || new Error('Transacción fallida al leer audio'));
-  });
+      tx.oncomplete = () => db.close();
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error || new Error('Transacción fallida al leer audio'));
+      };
+    });
+  } catch (err) {
+    console.warn('getAudioBlob error:', err);
+    return null;
+  }
 }
 
 /**
@@ -109,18 +126,26 @@ export async function getAudioBlob(id) {
 export async function deleteAudioBlob(id) {
   if (!id) return true;
 
-  const db = await openAudioDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    const store = tx.objectStore(STORE_NAME);
+  try {
+    const db = await openAudioDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
 
-    const req = store.delete(id);
+      const req = store.delete(id);
 
-    req.onsuccess = () => resolve(true);
-    req.onerror = () => reject(req.error || new Error('Error al eliminar audio Blob de IndexedDB'));
+      req.onsuccess = () => resolve(true);
+      req.onerror = () => reject(req.error || new Error('Error al eliminar audio Blob de IndexedDB'));
 
-    tx.oncomplete = () => db.close();
-  });
+      tx.oncomplete = () => db.close();
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error || new Error('Error al eliminar audio'));
+      };
+    });
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -128,16 +153,24 @@ export async function deleteAudioBlob(id) {
  * @returns {Promise<boolean>}
  */
 export async function clearAudioBlobs() {
-  const db = await openAudioDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    const store = tx.objectStore(STORE_NAME);
+  try {
+    const db = await openAudioDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
 
-    const req = store.clear();
+      const req = store.clear();
 
-    req.onsuccess = () => resolve(true);
-    req.onerror = () => reject(req.error || new Error('Error al limpiar almacén de audio IndexedDB'));
+      req.onsuccess = () => resolve(true);
+      req.onerror = () => reject(req.error || new Error('Error al limpiar almacén de audio IndexedDB'));
 
-    tx.oncomplete = () => db.close();
-  });
+      tx.oncomplete = () => db.close();
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error || new Error('Error limpiando almacén'));
+      };
+    });
+  } catch {
+    return false;
+  }
 }

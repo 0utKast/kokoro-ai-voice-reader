@@ -59,7 +59,10 @@ async function init() {
   await loadAndRenderVoices();
   await loadSavedSettings();
   await checkHardwareStatus();
-  await syncPlaybackState();
+  const isPlayingActive = await syncPlaybackState();
+  if (!isPlayingActive) {
+    await restoreLastConversion();
+  }
   setupEventListeners();
 }
 
@@ -75,10 +78,78 @@ async function syncPlaybackState() {
       }
       updatePlayPauseUI(state.isPlaying, state.isPaused);
       updateConversionUI(state);
+      return true;
+    } else if (state?.isConversionComplete) {
+      isConversionComplete = true;
+      if (state.chunks && state.chunks.length > 0) {
+        currentChunks = state.chunks;
+      }
+      totalExpectedChunks = state.totalExpectedChunks || state.totalChunks || 0;
+      updateConversionUI(state);
+      return false;
     }
   } catch {
     // Engine not active or playing
   }
+  return false;
+}
+
+/**
+ * Restores the last completed conversion from persistent storage (IndexedDB + chrome.storage.local)
+ * so that upon reopening the extension, audio can be downloaded immediately and text is preserved.
+ */
+async function restoreLastConversion() {
+  try {
+    const data = await chrome.storage.local.get('kokoro_last_conversion');
+    const last = data.kokoro_last_conversion;
+    const record = await getAudioBlob('latest_book_audio').catch(() => null);
+
+    if (record?.blob && record.blob.size > 0) {
+      isConversionComplete = true;
+      const sizeMB = (record.blob.size / 1024 / 1024).toFixed(1);
+      const total = last?.totalChunks || record.totalChunks || (last?.chunks ? last.chunks.length : 1);
+      totalExpectedChunks = total;
+
+      if (last?.title || record.title) {
+        currentDocumentTitle = last?.title || record.title;
+      }
+
+      // Restore text in editor if empty
+      if (!textInput.value.trim() && (last?.text || record.text)) {
+        textInput.value = last?.text || record.text;
+      }
+
+      // Restore chunks if available
+      if (last?.chunks && Array.isArray(last.chunks) && last.chunks.length > 0) {
+        currentChunks = last.chunks;
+      }
+
+      // Enable download button in green ready state
+      btnDownloadAudio.disabled = false;
+      btnDownloadAudio.classList.add('btn-download-ready');
+      if (btnDownloadText) btnDownloadText.textContent = 'Descargar MP3';
+      btnDownloadAudio.title = `Descargar último audio guardado (${sizeMB} MB, ${total} frases)`;
+
+      if (playbackStatusBar) playbackStatusBar.classList.remove('hidden');
+      if (conversionProgressFill) {
+        conversionProgressFill.style.width = '100%';
+        conversionProgressFill.classList.add('done');
+      }
+      if (conversionStatusBadge) {
+        conversionStatusBadge.textContent = `✓ Audio guardado (${sizeMB} MB)`;
+        conversionStatusBadge.classList.add('done');
+      }
+      if (currentChunkBadge) {
+        currentChunkBadge.textContent = `🔊 Audio listo (${total} frases)`;
+      }
+
+      console.log(`[Kokoro] Última conversión restaurada con éxito: ${sizeMB} MB, ${total} frases.`);
+      return true;
+    }
+  } catch (err) {
+    console.warn('Error restaurando última conversión:', err);
+  }
+  return false;
 }
 
 async function loadAndRenderVoices() {
@@ -172,13 +243,20 @@ function updatePlayPauseUI(playing, paused) {
 function updateConversionUI(info) {
   if (!info) return;
 
-  const pct = typeof info.conversionProgress === 'number' ? info.conversionProgress : (isConversionComplete ? 100 : 0);
+  if (typeof info.isConversionComplete === 'boolean') {
+    isConversionComplete = info.isConversionComplete;
+  }
+
+  const conversionDone = Boolean(isConversionComplete || info.isConversionComplete);
+  const pct = typeof info.conversionProgress === 'number' 
+    ? info.conversionProgress 
+    : (conversionDone ? 100 : 0);
   const converted = info.convertedChunks || 0;
-  const total = info.totalExpectedChunks || totalExpectedChunks || 0;
+  const total = info.totalExpectedChunks || totalExpectedChunks || converted || 0;
 
   if (conversionProgressFill) {
     conversionProgressFill.style.width = `${pct}%`;
-    if (info.isConversionComplete) {
+    if (conversionDone) {
       conversionProgressFill.classList.add('done');
     } else {
       conversionProgressFill.classList.remove('done');
@@ -186,7 +264,7 @@ function updateConversionUI(info) {
   }
 
   if (conversionStatusBadge) {
-    if (info.isConversionComplete) {
+    if (conversionDone) {
       conversionStatusBadge.textContent = `✓ Audio completo (${total} frases)`;
       conversionStatusBadge.classList.add('done');
     } else if (total > 0) {
@@ -198,8 +276,8 @@ function updateConversionUI(info) {
     }
   }
 
-  // Manage MP3 download button state
-  if (info.isConversionComplete) {
+  // Manage MP3 download button state: Once converted, keep ready and active!
+  if (conversionDone) {
     btnDownloadAudio.disabled = false;
     btnDownloadAudio.classList.add('btn-download-ready');
     if (btnDownloadText) btnDownloadText.textContent = 'Descargar MP3';
@@ -210,12 +288,10 @@ function updateConversionUI(info) {
     if (btnDownloadText) btnDownloadText.textContent = `MP3 (${pct}%)`;
     btnDownloadAudio.title = `Sintetizando audio: ${converted} de ${total} frases (${pct}%). La descarga MP3 estará lista al finalizar.`;
   } else {
-    if (!isConversionComplete) {
-      btnDownloadAudio.disabled = true;
-      btnDownloadAudio.classList.remove('btn-download-ready');
-      if (btnDownloadText) btnDownloadText.textContent = 'Descargar MP3';
-      btnDownloadAudio.title = 'Inicia la lectura para sintetizar y descargar el audio MP3';
-    }
+    btnDownloadAudio.disabled = true;
+    btnDownloadAudio.classList.remove('btn-download-ready');
+    if (btnDownloadText) btnDownloadText.textContent = 'Descargar MP3';
+    btnDownloadAudio.title = 'Inicia la lectura para sintetizar y descargar el audio MP3';
   }
 }
 
@@ -349,7 +425,8 @@ async function startPlayback() {
       text: text,
       voice: voice,
       speed: speed,
-      volume: 1.0
+      volume: 1.0,
+      title: currentDocumentTitle || 'audio_kokoro'
     });
 
     updatePlayPauseUI(true, false);
@@ -604,12 +681,13 @@ function setupEventListeners() {
   }
 
   // Clear text
-  btnClearText.addEventListener('click', () => {
-    stopPlayback();
+  btnClearText.addEventListener('click', async () => {
+    await stopPlayback();
     textInput.value = '';
     textInput.focus();
     currentDocumentTitle = '';
-    clearAudioBlobs().catch(() => {});
+    await clearAudioBlobs().catch(() => {});
+    await chrome.storage.local.remove('kokoro_last_conversion').catch(() => {});
     isConversionComplete = false;
     totalExpectedChunks = 0;
     btnDownloadAudio.disabled = true;
@@ -628,11 +706,17 @@ function setupEventListeners() {
 
   // Download MP3
   btnDownloadAudio.addEventListener('click', async () => {
+    // If not marked complete in memory, verify if persistent audio exists in IndexedDB
     if (!isConversionComplete) {
-      modelProgressCard.classList.remove('hidden');
-      modelStatusText.textContent = 'El audio aún se está procesando en WebGPU. Espera a que la conversión alcance el 100% para descargarlo completo en MP3.';
-      modelPercentText.textContent = '⏳';
-      return;
+      const record = await getAudioBlob('latest_book_audio').catch(() => null);
+      if (record?.blob && record.blob.size > 0) {
+        isConversionComplete = true;
+      } else {
+        modelProgressCard.classList.remove('hidden');
+        modelStatusText.textContent = 'El audio aún se está procesando en WebGPU. Espera a que la conversión alcance el 100% para descargarlo completo en MP3.';
+        modelPercentText.textContent = '⏳';
+        return;
+      }
     }
 
     const originalBtnText = btnDownloadText ? btnDownloadText.textContent : 'Descargar MP3';
@@ -640,46 +724,55 @@ function setupEventListeners() {
     btnDownloadAudio.disabled = true;
 
     try {
-      await chrome.runtime.sendMessage({ type: 'ENSURE_OFFSCREEN' }).catch(() => {});
-      const res = await chrome.runtime.sendMessage({ type: 'DOWNLOAD_MP3' });
-
-      if (res?.error) {
-        modelProgressCard.classList.remove('hidden');
-        modelStatusText.textContent = res.error;
-        modelPercentText.textContent = '⚠️';
-        if (btnDownloadText) btnDownloadText.textContent = originalBtnText;
-        btnDownloadAudio.disabled = false;
-        return;
-      }
-
       let blob = null;
-      const ext = res?.format === 'wav' ? 'wav' : 'mp3';
+      let ext = 'mp3';
 
-      // 1. Retrieve Blob directly from IndexedDB (zero IPC size restrictions!)
-      if (res?.storageKey) {
-        const record = await getAudioBlob(res.storageKey);
-        blob = record?.blob || null;
+      // 1. Direct retrieval from IndexedDB (instant, zero IPC size restrictions, survives engine restart)
+      try {
+        const record = await getAudioBlob('latest_book_audio');
+        if (record?.blob && record.blob.size > 0) {
+          blob = record.blob;
+          ext = record.format || 'mp3';
+        }
+      } catch (idbErr) {
+        console.warn('Direct IndexedDB retrieval failed:', idbErr);
       }
 
-      // 2. Backward-compatibility fallback if dataUrl was returned
-      if (!blob && res?.dataUrl) {
-        try {
+      // 2. Fallback: ask offscreen engine via message
+      if (!blob) {
+        await chrome.runtime.sendMessage({ type: 'ENSURE_OFFSCREEN' }).catch(() => {});
+        const res = await chrome.runtime.sendMessage({ type: 'DOWNLOAD_MP3' }).catch(() => null);
+
+        if (res?.error) {
+          throw new Error(res.error);
+        }
+
+        if (res?.storageKey) {
+          const record = await getAudioBlob(res.storageKey);
+          blob = record?.blob || null;
+          ext = res.format || 'mp3';
+        } else if (res?.dataUrl) {
           const resp = await fetch(res.dataUrl);
           blob = await resp.blob();
-        } catch (fetchErr) {
-          console.warn('Fallback dataUrl fetch failed:', fetchErr);
+          ext = res.format || 'mp3';
         }
       }
 
       if (!blob || blob.size === 0) {
-        throw new Error('No se pudo recuperar el archivo de audio generado.');
+        throw new Error('No se encontró el archivo de audio para descargar.');
+      }
+
+      // Ensure proper audio Blob type
+      if (!blob.type || !blob.type.startsWith('audio/')) {
+        blob = new Blob([blob], { type: ext === 'wav' ? 'audio/wav' : 'audio/mp3' });
       }
 
       // Create clean filename based on book/document title
       const safeTitle = (currentDocumentTitle || 'kokoro-audio')
         .replace(/[/\\?%*:|"<>]/g, '-')
         .replace(/\s+/g, '_')
-        .slice(0, 50);
+        .replace(/^_+|_+$/g, '')
+        .slice(0, 50) || 'kokoro-audio';
       const filename = `${safeTitle}.${ext}`;
       const fileSizeMB = (blob.size / 1024 / 1024).toFixed(1);
 
@@ -687,25 +780,8 @@ function setupEventListeners() {
       const blobUrl = URL.createObjectURL(blob);
       let downloadTriggered = false;
 
-      // Primary download strategy: DOM anchor in sidepanel
-      // Standard browser DOM behavior; works with gigabyte-scale Blobs with zero IPC/URL length limits
-      try {
-        const a = document.createElement('a');
-        a.style.display = 'none';
-        a.href = blobUrl;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        downloadTriggered = true;
-        setTimeout(() => {
-          if (a.parentNode) a.parentNode.removeChild(a);
-        }, 2000);
-      } catch (domErr) {
-        console.warn('DOM anchor download fallo, probando chrome.downloads:', domErr);
-      }
-
-      // Secondary download strategy: chrome.downloads API
-      if (!downloadTriggered && chrome.downloads && chrome.downloads.download) {
+      // Primary download strategy: chrome.downloads API (Manifest V3 recommended for extension pages)
+      if (chrome.downloads && chrome.downloads.download) {
         try {
           await chrome.downloads.download({
             url: blobUrl,
@@ -714,7 +790,25 @@ function setupEventListeners() {
           });
           downloadTriggered = true;
         } catch (dlErr) {
-          console.warn('chrome.downloads API fallo:', dlErr);
+          console.warn('chrome.downloads API fallo, probando enlace DOM:', dlErr);
+        }
+      }
+
+      // Fallback strategy: DOM anchor in sidepanel
+      if (!downloadTriggered) {
+        try {
+          const a = document.createElement('a');
+          a.style.display = 'none';
+          a.href = blobUrl;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          downloadTriggered = true;
+          setTimeout(() => {
+            if (a.parentNode) a.parentNode.removeChild(a);
+          }, 2000);
+        } catch (domErr) {
+          console.warn('DOM anchor download fallo:', domErr);
         }
       }
 
@@ -722,15 +816,16 @@ function setupEventListeners() {
         throw new Error('No se pudo iniciar la descarga del archivo en el navegador.');
       }
 
-      // Clean up object URL after safe window
+      // Keep object URL valid long enough for download to complete
       setTimeout(() => {
         URL.revokeObjectURL(blobUrl);
-      }, 60000);
+      }, 120000);
 
       if (btnDownloadText) btnDownloadText.textContent = `✓ MP3 (${fileSizeMB} MB)`;
+      btnDownloadAudio.disabled = false;
+      btnDownloadAudio.classList.add('btn-download-ready');
       setTimeout(() => {
         if (btnDownloadText) btnDownloadText.textContent = originalBtnText;
-        btnDownloadAudio.disabled = false;
       }, 3500);
     } catch (err) {
       console.error('Error al descargar audio:', err);
@@ -739,6 +834,7 @@ function setupEventListeners() {
       modelPercentText.textContent = '❌';
       if (btnDownloadText) btnDownloadText.textContent = originalBtnText;
       btnDownloadAudio.disabled = false;
+      btnDownloadAudio.classList.add('btn-download-ready');
     }
   });
 

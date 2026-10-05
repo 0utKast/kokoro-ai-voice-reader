@@ -44,6 +44,23 @@ let currentActiveChunkIndex = -1;
 let scheduledChunks = [];
 let playbackMonitorInterval = null;
 
+// Initialize persistent state from previous conversion if available
+(async () => {
+  try {
+    const data = await chrome.storage.local.get('kokoro_last_conversion');
+    if (data?.kokoro_last_conversion?.hasAudio && !isPlaying) {
+      const last = data.kokoro_last_conversion;
+      isConversionComplete = true;
+      totalScheduledChunks = last.totalChunks || 0;
+      totalExpectedChunks = last.totalChunks || 0;
+      convertedChunks = last.totalChunks || 0;
+      currentChunkTexts = Array.isArray(last.chunks) ? last.chunks : [];
+    }
+  } catch (err) {
+    console.warn('Error recuperando estado persistente en offscreen:', err);
+  }
+})();
+
 // 1. Initialize Audio Context
 function getAudioContext() {
   if (!audioCtx) {
@@ -314,17 +331,64 @@ async function playText(text, options = {}) {
       isConversionComplete = true;
 
       // Finalize MP3 and store into IndexedDB immediately (instant download ready)
+      let mp3Blob = null;
       if (progressiveMp3Encoder) {
         try {
-          const mp3Blob = progressiveMp3Encoder.finish();
-          await saveAudioBlob('latest_book_audio', mp3Blob, {
-            format: 'mp3',
-            totalChunks: totalScheduledChunks,
-            duration: progressiveMp3Encoder.durationSeconds
-          });
-          console.log(`[Kokoro] Audio MP3 guardado en IndexedDB: ${(mp3Blob.size / 1024 / 1024).toFixed(2)} MB (${progressiveMp3Encoder.durationSeconds.toFixed(1)}s)`);
+          mp3Blob = progressiveMp3Encoder.finish();
+        } catch (encErr) {
+          console.error('Error finalizando codificador progresivo MP3:', encErr);
+        }
+      }
+      if (!mp3Blob && accumulatedBuffers && accumulatedBuffers.length > 0) {
+        try {
+          mp3Blob = encodeMP3(accumulatedBuffers, 24000, 64);
+        } catch (encErr2) {
+          console.error('Fallback encodeMP3 falló:', encErr2);
+        }
+      }
+
+      if (mp3Blob && mp3Blob.size > 0) {
+        const duration = progressiveMp3Encoder?.durationSeconds || 0;
+        const metadata = {
+          format: 'mp3',
+          totalChunks: totalScheduledChunks,
+          duration: duration,
+          size: mp3Blob.size,
+          updatedAt: Date.now(),
+          title: options.title || '',
+          text: text,
+          chunks: chunkTexts,
+          voice: currentVoice,
+          speed: currentSpeed
+        };
+
+        try {
+          await saveAudioBlob('latest_book_audio', mp3Blob, metadata);
+          console.log(`[Kokoro] Audio MP3 persistente guardado en IndexedDB: ${(mp3Blob.size / 1024 / 1024).toFixed(2)} MB (${duration.toFixed(1)}s)`);
         } catch (storageErr) {
           console.error('Error guardando audio MP3 en IndexedDB:', storageErr);
+        }
+
+        // Save lightweight persistent metadata in chrome.storage.local for instantaneous recovery
+        try {
+          await chrome.storage.local.set({
+            kokoro_last_conversion: {
+              hasAudio: true,
+              storageKey: 'latest_book_audio',
+              format: 'mp3',
+              size: mp3Blob.size,
+              duration: duration,
+              title: metadata.title,
+              text: text,
+              chunks: chunkTexts,
+              totalChunks: totalScheduledChunks,
+              voice: currentVoice,
+              speed: currentSpeed,
+              timestamp: metadata.updatedAt
+            }
+          });
+        } catch (metaErr) {
+          console.warn('Error guardando metadatos en chrome.storage.local:', metaErr);
         }
       }
 
@@ -523,7 +587,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         chrome.runtime.sendMessage({
           type: MESSAGE_TYPES.PLAYBACK_STATE,
           isPlaying: isPlaying,
-          isPaused: true
+          isPaused: true,
+          isConversionComplete: isConversionComplete,
+          totalExpectedChunks: totalExpectedChunks,
+          convertedChunks: convertedChunks,
+          conversionProgress: isConversionComplete ? 100 : Math.round((convertedChunks / (totalExpectedChunks || 1)) * 100)
         }).catch(() => {});
         sendResponse({ success: true });
         break;
@@ -537,7 +605,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         chrome.runtime.sendMessage({
           type: MESSAGE_TYPES.PLAYBACK_STATE,
           isPlaying: isPlaying,
-          isPaused: false
+          isPaused: false,
+          isConversionComplete: isConversionComplete,
+          totalExpectedChunks: totalExpectedChunks,
+          convertedChunks: convertedChunks,
+          conversionProgress: isConversionComplete ? 100 : Math.round((convertedChunks / (totalExpectedChunks || 1)) * 100)
         }).catch(() => {});
         sendResponse({ success: true });
         break;
@@ -567,21 +639,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case "DOWNLOAD_MP3":
       case "DOWNLOAD_AUDIO": {
-        if (!isConversionComplete) {
-          sendResponse({
-            error: `La conversión no ha finalizado todavía (${convertedChunks} de ${totalExpectedChunks} frases sintetizadas). Podrás descargar el archivo MP3 cuando se complete el 100%.`
-          });
-          return;
-        }
-
         try {
-          // Check if already finalized and saved in IndexedDB
+          // 1. Check if already finalized and saved in IndexedDB
           let record = await getAudioBlob('latest_book_audio');
           let blob = record?.blob;
           let format = record?.format || 'mp3';
 
           if (!blob) {
-            // Finalize on-the-fly if not already stored
+            // Finalize on-the-fly if progressive encoder has data
             if (progressiveMp3Encoder && progressiveMp3Encoder.totalSamples > 0) {
               blob = progressiveMp3Encoder.finish();
               format = 'mp3';
@@ -590,7 +655,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               format = 'mp3';
             }
 
-            if (blob) {
+            if (blob && blob.size > 0) {
               await saveAudioBlob('latest_book_audio', blob, {
                 format,
                 duration: progressiveMp3Encoder?.durationSeconds || 0
@@ -600,7 +665,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
 
           if (!blob || blob.size === 0) {
-            sendResponse({ error: "No hay audio generado todavía para descargar." });
+            if (!isConversionComplete) {
+              sendResponse({
+                error: `La conversión aún no ha finalizado (${convertedChunks} de ${totalExpectedChunks} frases sintetizadas). Podrás descargar el archivo MP3 cuando se complete el 100%.`
+              });
+            } else {
+              sendResponse({ error: "No hay audio generado todavía para descargar." });
+            }
             return;
           }
 
@@ -614,7 +685,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             duration: record?.duration || 0
           });
         } catch (err) {
-          console.error('Error generando archivo de audio:', err);
+          console.error('Error preparando archivo de audio:', err);
           sendResponse({ error: `Error preparando archivo de audio: ${err.message}` });
         }
         break;
