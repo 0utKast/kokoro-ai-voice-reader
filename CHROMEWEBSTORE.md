@@ -1,6 +1,6 @@
 # Chrome Web Store Listing — Kokoro AI Voice Reader
 
-> Last Updated: 2026-10-02
+> Last Updated: 2026-10-05
 
 ## Store Listing
 
@@ -23,7 +23,7 @@ Key Features:
 - Permanent Side Panel: Read articles comfortably without popup windows closing when you click away.
 - One-Click Article Capture: Automatically extract and listen to clean article content from news sites and blogs without clutter.
 - Text Selection Quick-Reader: Highlight any paragraph or snippet on any website to hear it spoken immediately.
-- Audio Export: Download synthesized speech as high-quality WAV audio files for offline listening or study.
+- Audio Export: Download synthesized speech as high-quality MP3 or WAV audio files for offline listening or study, even for full-length books.
 
 How to Use:
 1. Open the Kokoro side panel from the extension toolbar or press Alt+Shift+S (Option+Shift+S on Mac).
@@ -67,6 +67,7 @@ English
 
 | Permission | Type | Justification |
 |------------|------|---------------|
+| `tabs` | permissions | Queries the active browser tab to send text extraction requests to the content script for reading articles and user selections. |
 | `sidePanel` | permissions | Provides a persistent, non-intrusive side panel interface where users control playback, adjust speech settings, and follow karaoke text while browsing. |
 | `offscreen` | permissions | Creates a background offscreen document required to access the WebGPU and Web Audio APIs for local neural model inference and continuous audio playback. |
 | `storage` | permissions | Saves user preferences locally, including selected voice, playback speed, volume, and speech history. |
@@ -74,6 +75,7 @@ English
 | `contextMenus` | permissions | Adds an option to the right-click menu so users can instantly read any highlighted text selection. |
 | `downloads` | permissions | Enables users to export and download generated neural speech audio files (MP3/WAV) directly to their local downloads folder for offline listening. |
 | `scripting` | permissions | Injects the content script helper to extract clean article text and highlight sentences on the webpage when requested by the user. |
+| `https://huggingface.co/*`, `https://*.huggingface.co/*`, `https://*.hf.space/*` | host_permissions | Allows downloading open-source Kokoro-82M neural model weights and voice embeddings on initial setup directly from Hugging Face for offline local caching. |
 
 ---
 
@@ -105,9 +107,10 @@ English
 
 | Version | Date | Changes | Status |
 |---------|------|---------|--------|
-| 1.1.3 | 2026-10-02 | Added user preference toggle to enable/disable floating selection quick-action pill (disabled by default to prevent intrusion), fixed playback execution when clicking the quick-action pill via unified service worker offscreen orchestration, improved pill positioning and avoided editable input fields. | Ready for Submission |
+| 1.1.4 | 2026-10-05 | Solved full audiobook MP3 export for long documents using progressive streaming encoding and temporary IndexedDB storage (bypassing Chrome 64MB IPC message limits). Improved karaoke sentence synchronization with incremental rendering and resolved pause/resume timing drift. Enhanced side panel responsive layout and smooth scrolling. | Ready for Submission |
+| 1.1.3 | 2026-10-02 | Added user preference toggle to enable/disable floating selection quick-action pill (disabled by default to prevent intrusion), fixed playback execution when clicking the quick-action pill via unified service worker offscreen orchestration, improved pill positioning and avoided editable input fields. | Published / Approved |
 | 1.1.2 | 2026-09-28 | Fixed unnatural mid-sentence phrasing pauses with smart sentence grouping, fixed MP3 download execution via native chrome.downloads API, and added explicit downloads permission. | Superseded |
 | 1.1.1 | 2026-09-27 | Internal refinement of audio streaming and offscreen worker initialization. | Superseded |
-| 1.1.0 | 2026-09-27 | Added integrated PDF reader (local and tab-based), pure JS MP3 audio compression (LameJS, 82% smaller), and decoupled real-time WebGPU synthesis progress tracking. | Submitted for Review |
+| 1.1.0 | 2026-09-27 | Added integrated PDF reader (local and tab-based), pure JS MP3 audio compression (LameJS, 82% smaller), and decoupled real-time WebGPU synthesis progress tracking. | Published / Approved |
 | 1.0.0 | 2026-09-26 | Initial release: Manifest V3 with WebGPU Kokoro-82M offline engine, Side Panel UI, and Karaoke mode. | Draft |
 
