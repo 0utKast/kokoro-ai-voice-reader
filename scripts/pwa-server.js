@@ -24,26 +24,31 @@ const ROOT_DIR = path.resolve(__dirname, '..');
 const HTTP_PORT = process.env.PORT || 8080;
 const HTTPS_PORT = process.env.HTTPS_PORT || 8443;
 
-// Find local network IP (Wi-Fi / Ethernet)
-function getLocalIp() {
+// Detect all local network IPv4 addresses (Wi-Fi, Ethernet)
+function getAllLocalIps() {
   const interfaces = os.networkInterfaces();
+  const list = [];
   for (const name of Object.keys(interfaces)) {
     for (const iface of interfaces[name] || []) {
       if (iface.family === 'IPv4' && !iface.internal) {
-        return iface.address;
+        list.push({ name, address: iface.address });
       }
     }
   }
-  return '127.0.0.1';
+  return list;
 }
 
-const localIp = getLocalIp();
+const allIps = getAllLocalIps();
+const primaryIp = allIps[0]?.address || '127.0.0.1';
 
-// Ensure SSL Certificate exists or generate self-signed with IP SAN
+// Ensure SSL Certificate exists or generate self-signed with all IP SANs
 function getOrCreateSSLCert() {
   const sslDir = path.join(__dirname, 'ssl');
   const keyPath = path.join(sslDir, 'key.pem');
   const certPath = path.join(sslDir, 'cert.pem');
+
+  const ipSans = allIps.map(ip => `IP:${ip.address}`).join(',');
+  const sanList = `subjectAltName=${ipSans ? ipSans + ',' : ''}IP:127.0.0.1,DNS:localhost`;
 
   if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
     fs.mkdirSync(sslDir, { recursive: true });
@@ -51,7 +56,7 @@ function getOrCreateSSLCert() {
     try {
       execSync(
         `openssl req -x509 -newkey rsa:2048 -keyout "${keyPath}" -out "${certPath}" -sha256 -days 365 -nodes ` +
-        `-subj "/CN=${localIp}" -addext "subjectAltName=IP:${localIp},IP:127.0.0.1,DNS:localhost"`,
+        `-subj "/CN=${primaryIp}" -addext "${sanList}"`,
         { stdio: 'ignore' }
       );
     } catch (err) {
@@ -216,14 +221,19 @@ function printBanner(hasHttps) {
     console.log(`   HTTPS:  https://localhost:${HTTPS_PORT}/pwa/`);
   }
 
-  console.log(`\n📲 [En tu teléfono móvil (misma red Wi-Fi)]:`);
+  console.log(`\n📲 [En tu teléfono móvil (misma red local)]:`);
+  allIps.forEach((iface) => {
+    const label = iface.name.toLowerCase().includes('en1') ? 'Wi-Fi' : (iface.name.toLowerCase().includes('en0') ? 'Ethernet' : iface.name);
+    console.log(`   📡 Conexión por ${label} (${iface.address}):`);
+    if (hasHttps) {
+      console.log(`      🌟 HTTPS: https://${iface.address}:${HTTPS_PORT}/pwa/`);
+    }
+    console.log(`      ⚡ HTTP:  http://${iface.address}:${HTTP_PORT}/pwa/`);
+  });
+
   if (hasHttps) {
-    console.log(`   🌟 HTTPS RECOMENDADO (WebGPU Habilitado):`);
-    console.log(`      https://${localIp}:${HTTPS_PORT}/pwa/`);
-    console.log(`      (Acepta el aviso de certificado en el navegador del móvil una sola vez)`);
+    console.log(`\n   ℹ️ Nota para HTTPS: Acepta el aviso de certificado en el navegador del móvil (Avanzado -> Continuar).`);
   }
-  console.log(`\n   ⚡ HTTP (WASM Fallback si WebGPU no requiere HTTPS):`);
-  console.log(`      http://${localIp}:${HTTP_PORT}/pwa/`);
 
   console.log(`\n🔌 [En Android con cable USB (Acceso directo a WebGPU)]:`);
   console.log(`   1. Conecta el teléfono por USB con Depuración USB activa`);
