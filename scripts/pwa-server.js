@@ -238,8 +238,18 @@ function handleRequest(req, res) {
   fs.createReadStream(filePath).pipe(res);
 }
 
-// Start HTTP server
-const httpServer = http.createServer(handleRequest);
+// Start HTTP server (auto-redirects remote mobile IPs to HTTPS for WebGPU Secure Context)
+const httpServer = http.createServer((req, res) => {
+  const host = (req.headers.host || '').split(':')[0];
+  if (host && host !== 'localhost' && host !== '127.0.0.1' && req.url !== '/api/log') {
+    const targetUrl = `https://${host}:${HTTPS_PORT}${req.url.startsWith('/pwa') ? req.url : '/pwa/'}`;
+    console.log(`[HTTP 301] ${req.url} -> ${targetUrl}`);
+    res.writeHead(301, { Location: targetUrl });
+    res.end();
+    return;
+  }
+  handleRequest(req, res);
+});
 httpServer.on('clientError', (err, socket) => {
   if (err.code === 'ECONNRESET' || socket.destroyed) return;
   socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
