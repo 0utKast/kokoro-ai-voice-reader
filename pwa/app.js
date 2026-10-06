@@ -84,9 +84,40 @@ let totalExpectedChunks = 0;
 let convertedChunks = 0;
 let isConversionComplete = false;
 let currentDocumentTitle = '';
+let currentFullDocumentText = '';
 let playbackMonitorInterval = null;
 let wakeLock = null;
 let deferredPrompt = null;
+
+// Safe document text loader with mobile DOM overflow protection
+function loadDocumentText(rawText, docTitle = '') {
+  const normalized = normalizeTextForSpeech(rawText || '');
+  currentFullDocumentText = normalized;
+  if (docTitle) {
+    currentDocumentTitle = docTitle;
+  }
+
+  // Mobile DOM protection: never insert massive text directly into <textarea>
+  // A textarea with > 5,000 characters causes mobile GPU compositor OOM/crashes
+  const MAX_DOM_PREVIEW = 2000;
+  if (normalized.length <= MAX_DOM_PREVIEW) {
+    textInput.value = normalized;
+  } else {
+    const preview = normalized.slice(0, MAX_DOM_PREVIEW).trim();
+    const wordCount = normalized.split(/\s+/).filter(Boolean).length;
+    const charCount = normalized.length;
+    const titleLabel = currentDocumentTitle || 'Documento';
+
+    textInput.value = `${preview}\n\n` +
+      `======================================================\n` +
+      `📖 [DOCUMENTO COMPLETO CARGADO EN MEMORIA]\n` +
+      `• Título: ${titleLabel}\n` +
+      `• Palabras: ${wordCount.toLocaleString()}\n` +
+      `• Caracteres: ${charCount.toLocaleString()}\n` +
+      `• Listo para reproducir y generar MP3\n` +
+      `======================================================`;
+  }
+}
 
 // --- 1. Initialization ---
 async function init() {
@@ -231,10 +262,7 @@ function handleSharedTargetParams() {
 
   const incoming = [sharedText, sharedUrl].filter(Boolean).join('\n\n').trim();
   if (incoming) {
-    textInput.value = normalizeTextForSpeech(incoming);
-    if (sharedTitle) {
-      currentDocumentTitle = sharedTitle.slice(0, 40);
-    }
+    loadDocumentText(incoming, (sharedTitle || '').slice(0, 40));
     // Clean URL
     window.history.replaceState({}, document.title, window.location.pathname);
   }
@@ -257,11 +285,7 @@ async function restoreLastConversion() {
       }
       if (!textInput.value.trim() && (lastMeta?.text || record.text)) {
         const fullText = lastMeta?.text || record.text;
-        if (fullText && fullText.length > 40000) {
-          textInput.value = fullText.slice(0, 40000) + `\n\n... [Texto completo guardado en memoria (${Math.round(fullText.length / 1000)}k caracteres)]`;
-        } else {
-          textInput.value = fullText || '';
-        }
+        loadDocumentText(fullText, currentDocumentTitle);
       }
       if (lastMeta?.chunks && Array.isArray(lastMeta.chunks)) {
         currentChunks = lastMeta.chunks;
@@ -396,7 +420,12 @@ function stopAudioPlayback() {
 }
 
 async function startPlayback() {
-  const rawText = textInput.value.trim();
+  let rawText = (currentFullDocumentText || '').trim();
+  if (!rawText || (textInput.value.trim() && !textInput.value.includes('[DOCUMENTO COMPLETO CARGADO EN MEMORIA]'))) {
+    rawText = textInput.value.trim();
+    currentFullDocumentText = rawText;
+  }
+
   if (!rawText) {
     textInput.focus();
     return;
@@ -817,13 +846,20 @@ function releaseWakeLock() {
 
 // --- 6. Event Listeners ---
 function setupEventListeners() {
+  let isTogglingPlayback = false;
   btnPlayPause.addEventListener('click', async () => {
-    if (!isPlaying) {
-      await startPlayback();
-    } else if (isPlaying && !isPaused) {
-      await pausePlayback();
-    } else {
-      await resumePlayback();
+    if (isTogglingPlayback) return;
+    isTogglingPlayback = true;
+    try {
+      if (!isPlaying) {
+        await startPlayback();
+      } else if (isPlaying && !isPaused) {
+        await pausePlayback();
+      } else {
+        await resumePlayback();
+      }
+    } finally {
+      isTogglingPlayback = false;
     }
   });
 
@@ -863,12 +899,19 @@ function setupEventListeners() {
     saveSetting('speed', currentSpeed);
   });
 
+  // Track manual text changes in textarea
+  textInput.addEventListener('input', () => {
+    if (!textInput.value.includes('[DOCUMENTO COMPLETO CARGADO EN MEMORIA]')) {
+      currentFullDocumentText = textInput.value;
+    }
+  });
+
   // Paste from clipboard
   btnPasteClip.addEventListener('click', async () => {
     try {
       const text = await navigator.clipboard.readText();
       if (text) {
-        textInput.value = normalizeTextForSpeech(text);
+        loadDocumentText(text, 'Texto pegado');
         btnPasteClip.textContent = '✓ Pegado';
         setTimeout(() => { btnPasteClip.textContent = 'Pegar'; }, 1500);
       }
@@ -894,14 +937,12 @@ function setupEventListeners() {
           modelProgressBar.style.width = `${Math.round((page / total) * 100)}%`;
         });
         if (extracted) {
-          currentDocumentTitle = file.name.replace(/\.[^/.]+$/, '');
-          textInput.value = normalizeTextForSpeech(extracted);
+          loadDocumentText(extracted, file.name.replace(/\.[^/.]+$/, ''));
           setTimeout(() => modelProgressCard.classList.add('hidden'), 1200);
         }
       } else {
         const raw = await file.text();
-        currentDocumentTitle = file.name.replace(/\.[^/.]+$/, '');
-        textInput.value = normalizeTextForSpeech(raw);
+        loadDocumentText(raw, file.name.replace(/\.[^/.]+$/, ''));
         setTimeout(() => modelProgressCard.classList.add('hidden'), 800);
       }
     } catch (err) {
@@ -914,6 +955,7 @@ function setupEventListeners() {
   // Clear text
   btnClearText.addEventListener('click', async () => {
     stopAudioPlayback();
+    currentFullDocumentText = '';
     textInput.value = '';
     currentDocumentTitle = '';
     currentChunks = [];
@@ -928,6 +970,27 @@ function setupEventListeners() {
     conversionProgressFill.style.width = '0%';
     conversionStatusBadge.textContent = '⚡ En espera';
   });
+
+  // Reset App & Clear Cache
+  const btnResetApp = document.getElementById('btn-reset-app');
+  if (btnResetApp) {
+    btnResetApp.addEventListener('click', async () => {
+      if (!confirm('¿Deseas reiniciar la aplicación y limpiar la memoria local?')) return;
+      stopAudioPlayback();
+      localStorage.clear();
+      sessionStorage.clear();
+      try {
+        await clearAudioBlobs().catch(() => {});
+      } catch {}
+      if ('serviceWorker' in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        for (const r of regs) await r.unregister();
+      }
+      const cachesKeys = await caches.keys().catch(() => []);
+      for (const k of cachesKeys) await caches.delete(k);
+      window.location.href = window.location.pathname;
+    });
+  }
 
   // Download MP3
   btnDownloadAudio.addEventListener('click', async () => {

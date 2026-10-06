@@ -122,9 +122,14 @@ function handleRequest(req, res) {
     return;
   }
 
-  // Default redirect root to PWA
-  if (pathname === '/' || pathname === '') {
-    res.writeHead(302, { Location: '/pwa/' });
+  // Request logger
+  if (!pathname.endsWith('.wasm') && !pathname.endsWith('.bin')) {
+    console.log(`[REQ ${new Date().toLocaleTimeString()}] ${req.method} ${req.url}`);
+  }
+
+  // Default redirect root or index.html to PWA
+  if (pathname === '/' || pathname === '' || pathname === '/index.html') {
+    res.writeHead(302, { Location: '/pwa/' + (parsedUrl.search || '') });
     res.end();
     return;
   }
@@ -143,21 +148,27 @@ function handleRequest(req, res) {
     pathname = '/src/shared/' + pathname.split('/src/shared/').pop();
   }
 
-  const safePath = path.normalize(pathname).replace(/^(\.\.[/\\])+/, '');
+  const safePath = path.normalize(pathname).replace(/^(\.\.[\/\\])+/, '');
   let filePath = path.join(ROOT_DIR, safePath);
 
-  // If directory requested without trailing slash, redirect with slash
+  // If directory requested without trailing slash, redirect with slash (preserve query)
   if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) {
-    res.writeHead(301, { Location: pathname + '/' });
+    res.writeHead(301, { Location: pathname + '/' + (parsedUrl.search || '') });
     res.end();
     return;
   }
 
+  // If not found in root, check if it lives in /pwa/
   if (!fs.existsSync(filePath)) {
-    console.warn(`[404] No encontrado: ${pathname}`);
-    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end(`404 No encontrado: ${pathname}`);
-    return;
+    const pwaFallback = path.join(ROOT_DIR, 'pwa', safePath);
+    if (fs.existsSync(pwaFallback) && !fs.statSync(pwaFallback).isDirectory()) {
+      filePath = pwaFallback;
+    } else {
+      console.warn(`[404] No encontrado: ${pathname}`);
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end(`404 No encontrado: ${pathname}`);
+      return;
+    }
   }
 
   const ext = path.extname(filePath).toLowerCase();
@@ -229,11 +240,20 @@ function handleRequest(req, res) {
 
 // Start HTTP server
 const httpServer = http.createServer(handleRequest);
+httpServer.on('clientError', (err, socket) => {
+  if (err.code === 'ECONNRESET' || socket.destroyed) return;
+  socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+});
+
 httpServer.listen(HTTP_PORT, '0.0.0.0', () => {
   // Try starting HTTPS server
   const sslOptions = getOrCreateSSLCert();
   if (sslOptions) {
     const httpsServer = https.createServer(sslOptions, handleRequest);
+    httpsServer.on('clientError', (err, socket) => {
+      if (err.code === 'ECONNRESET' || socket.destroyed) return;
+      socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+    });
     httpsServer.listen(HTTPS_PORT, '0.0.0.0', () => {
       printBanner(true);
     });

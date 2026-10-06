@@ -3,7 +3,7 @@
  * Provides offline caching for application assets, WASM binaries, and voices.
  */
 
-const CACHE_NAME = 'kokoro-pwa-v1.1.7';
+const CACHE_NAME = 'kokoro-pwa-v1.1.8';
 
 const PRECACHE_ASSETS = [
   './',
@@ -58,10 +58,16 @@ self.addEventListener('fetch', (event) => {
   // Skip non-HTTP schemes and telemetry/API calls
   if (!url.protocol.startsWith('http') || url.pathname.startsWith('/api/')) return;
 
+  // Direct bypass for explicit reset query parameter
+  if (url.searchParams.has('reset')) {
+    event.respondWith(fetch(event.request));
+    return;
+  }
+
   // Cache-first for voices and model assets
   if (url.pathname.includes('/voices/') || url.pathname.endsWith('.wasm') || url.pathname.endsWith('.bin')) {
     event.respondWith(
-      caches.match(event.request).then((cached) => {
+      caches.match(event.request, { ignoreSearch: true }).then((cached) => {
         if (cached) return cached;
         return fetch(event.request).then((response) => {
           if (response && response.status === 200) {
@@ -86,13 +92,15 @@ self.addEventListener('fetch', (event) => {
         return response;
       })
       .catch(async () => {
-        const cached = await caches.match(event.request);
+        const cached = await caches.match(event.request, { ignoreSearch: true });
         if (cached) return cached;
         if (event.request.mode === 'navigate') {
-          const fallback = await caches.match('./index.html');
+          const fallback = await caches.match('./index.html', { ignoreSearch: true }) ||
+                           await caches.match('/pwa/index.html', { ignoreSearch: true }) ||
+                           await caches.match('./', { ignoreSearch: true });
           if (fallback) return fallback;
         }
-        return new Response('Red no disponible', { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+        return new Response('Sin conexión a red local', { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
       })
   );
 });
