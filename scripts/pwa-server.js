@@ -114,6 +114,15 @@ function handleRequest(req, res) {
     pathname += 'index.html';
   }
 
+  // Handle path aliases (e.g. if relative imports resolve to /src/src/libs or /pwa/src/)
+  if (pathname.includes('/src/libs/')) {
+    pathname = '/src/libs/' + pathname.split('/src/libs/').pop();
+  } else if (pathname.includes('/src/voices/')) {
+    pathname = '/src/voices/' + pathname.split('/src/voices/').pop();
+  } else if (pathname.includes('/src/shared/')) {
+    pathname = '/src/shared/' + pathname.split('/src/shared/').pop();
+  }
+
   const safePath = path.normalize(pathname).replace(/^(\.\.[/\\])+/, '');
   let filePath = path.join(ROOT_DIR, safePath);
 
@@ -125,6 +134,7 @@ function handleRequest(req, res) {
   }
 
   if (!fs.existsSync(filePath)) {
+    console.warn(`[404] No encontrado: ${pathname}`);
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end(`404 No encontrado: ${pathname}`);
     return;
@@ -136,12 +146,13 @@ function handleRequest(req, res) {
   const totalSize = stat.size;
 
   // Security and Cross-Origin Headers for WebGPU & SharedArrayBuffer (WASM SIMD multithreading)
+  // Use credentialless to allow fetching cross-origin ONNX weights without strict CORP requirements
   const headers = {
     'Content-Type': contentType,
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
     'Cross-Origin-Opener-Policy': 'same-origin',
-    'Cross-Origin-Embedder-Policy': 'require-corp',
+    'Cross-Origin-Embedder-Policy': 'credentialless',
     'Cross-Origin-Resource-Policy': 'cross-origin',
     'Service-Worker-Allowed': '/'
   };

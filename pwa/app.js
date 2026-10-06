@@ -15,9 +15,10 @@ import {
 import { saveAudioBlob, getAudioBlob, clearAudioBlobs } from '../src/shared/audio-storage.js';
 import { extractTextFromPDF } from '../src/shared/pdf-extractor.js';
 
-// Configure local WASM paths for ONNX Runtime Web
+// Configure local WASM paths for ONNX Runtime Web (must be absolute URL for dynamic import())
+const libsAbsoluteUrl = new URL('../src/libs/', import.meta.url).href;
 if (env) {
-  env.wasmPaths = '../src/libs/';
+  env.wasmPaths = libsAbsoluteUrl;
   env.numThreads = 1;
 }
 
