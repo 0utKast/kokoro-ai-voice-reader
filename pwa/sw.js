@@ -55,8 +55,8 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
-  // Skip chrome-extension:// or non-HTTP schemes
-  if (!url.protocol.startsWith('http')) return;
+  // Skip non-HTTP schemes and telemetry/API calls
+  if (!url.protocol.startsWith('http') || url.pathname.startsWith('/api/')) return;
 
   // Cache-first for voices and model assets
   if (url.pathname.includes('/voices/') || url.pathname.endsWith('.wasm') || url.pathname.endsWith('.bin')) {
@@ -85,13 +85,14 @@ self.addEventListener('fetch', (event) => {
         }
         return response;
       })
-      .catch(() => {
-        return caches.match(event.request).then((cached) => {
-          if (cached) return cached;
-          if (event.request.mode === 'navigate') {
-            return caches.match('./index.html');
-          }
-        });
+      .catch(async () => {
+        const cached = await caches.match(event.request);
+        if (cached) return cached;
+        if (event.request.mode === 'navigate') {
+          const fallback = await caches.match('./index.html');
+          if (fallback) return fallback;
+        }
+        return new Response('Red no disponible', { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
       })
   );
 });

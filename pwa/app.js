@@ -90,14 +90,46 @@ let deferredPrompt = null;
 
 // --- 1. Initialization ---
 async function init() {
-  registerServiceWorker();
-  loadAndRenderVoices();
-  loadSavedSettings();
-  handleSharedTargetParams();
-  await checkHardwareStatus();
-  await restoreLastConversion();
-  setupEventListeners();
-  setupPwaInstallPrompt();
+  // Support ?reset=1 query parameter to cleanly wipe corrupted local state if ever needed
+  if (window.location.search.includes('reset=1')) {
+    try {
+      localStorage.clear();
+      sessionStorage.clear();
+      if ('serviceWorker' in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        for (const r of regs) await r.unregister();
+      }
+    } catch {}
+    window.location.href = window.location.pathname;
+    return;
+  }
+
+  try {
+    cleanOversizedStorage();
+    registerServiceWorker();
+    loadAndRenderVoices();
+    loadSavedSettings();
+    handleSharedTargetParams();
+    await checkHardwareStatus();
+    await restoreLastConversion();
+    setupEventListeners();
+    setupPwaInstallPrompt();
+  } catch (err) {
+    console.error('[Kokoro PWA] Fatal initialization error:', err);
+    if (hardwareText) hardwareText.textContent = `Aviso: ${err.message || 'Error'}`;
+  }
+}
+
+function cleanOversizedStorage() {
+  try {
+    const raw = localStorage.getItem('kokoro_last_conversion');
+    if (raw && raw.length > 50000) {
+      const parsed = JSON.parse(raw);
+      delete parsed.text;
+      delete parsed.chunks;
+      localStorage.setItem('kokoro_last_conversion', JSON.stringify(parsed));
+    }
+  } catch {}
 }
 
 function registerServiceWorker() {
@@ -224,7 +256,12 @@ async function restoreLastConversion() {
         currentDocumentTitle = lastMeta?.title || record.title;
       }
       if (!textInput.value.trim() && (lastMeta?.text || record.text)) {
-        textInput.value = lastMeta?.text || record.text;
+        const fullText = lastMeta?.text || record.text;
+        if (fullText && fullText.length > 40000) {
+          textInput.value = fullText.slice(0, 40000) + `\n\n... [Texto completo guardado en memoria (${Math.round(fullText.length / 1000)}k caracteres)]`;
+        } else {
+          textInput.value = fullText || '';
+        }
       }
       if (lastMeta?.chunks && Array.isArray(lastMeta.chunks)) {
         currentChunks = lastMeta.chunks;
@@ -482,9 +519,7 @@ async function startPlayback() {
           totalChunks: convertedChunks,
           size: mp3Blob.size,
           duration: duration,
-          title: metadata.title,
-          text: text,
-          chunks: chunkTexts
+          title: metadata.title
         }));
       }
 
