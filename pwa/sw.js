@@ -3,7 +3,7 @@
  * Provides offline caching for application assets, WASM binaries, and voices.
  */
 
-const CACHE_NAME = 'kokoro-pwa-v1.1.6';
+const CACHE_NAME = 'kokoro-pwa-v1.1.7';
 
 const PRECACHE_ASSETS = [
   './',

@@ -102,6 +102,26 @@ function handleRequest(req, res) {
   const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   let pathname = decodeURIComponent(parsedUrl.pathname);
 
+  // Telemetry endpoint for mobile debugging
+  if (pathname === '/api/log' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const parsed = JSON.parse(body);
+        console.log(`📱 [Móvil]:`, parsed);
+      } catch {
+        console.log(`📱 [Móvil]:`, body);
+      }
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      });
+      res.end('{"ok":true}');
+    });
+    return;
+  }
+
   // Default redirect root to PWA
   if (pathname === '/' || pathname === '') {
     res.writeHead(302, { Location: '/pwa/' });

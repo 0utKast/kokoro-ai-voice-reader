@@ -17,6 +17,27 @@
   <link rel="apple-touch-icon" href="icons/icon-192.png">
 
   <link rel="stylesheet" href="style.css">
+  <script>
+    // Remote mobile telemetry for instant diagnosis
+    window.addEventListener('error', function(e) {
+      try {
+        fetch('/api/log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'JS_ERROR', message: e.message, file: e.filename, line: e.lineno })
+        }).catch(function(){});
+      } catch(err){}
+    });
+    window.addEventListener('unhandledrejection', function(e) {
+      try {
+        fetch('/api/log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'UNHANDLED_REJECTION', reason: String(e.reason) })
+        }).catch(function(){});
+      } catch(err){}
+    });
+  </script>
 </head>
 <body>
   <div class="app-container">

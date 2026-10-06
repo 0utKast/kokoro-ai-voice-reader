@@ -251,7 +251,8 @@ async function restoreLastConversion() {
 function getAudioContext() {
   if (!audioCtx) {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    audioCtx = new AudioContextClass({ sampleRate: 24000 });
+    // Use device native sample rate (44.1k/48k) so suspend() and resume() never hang or fail on mobile OS
+    audioCtx = new AudioContextClass();
     gainNode = audioCtx.createGain();
     gainNode.gain.value = currentVolume;
     gainNode.connect(audioCtx.destination);
@@ -683,6 +684,45 @@ function scrollChunkIntoView(el) {
   karaokeDisplay.scrollTo({ top: Math.max(0, targetScrollTop), behavior: 'smooth' });
 }
 
+async function pausePlayback() {
+  if (!isPlaying || isPaused) return;
+  isPaused = true;
+  updatePlayPauseUI(true, true);
+  if ('mediaSession' in navigator) {
+    navigator.mediaSession.playbackState = 'paused';
+  }
+  if (audioCtx && audioCtx.state === 'running') {
+    try {
+      await Promise.race([
+        audioCtx.suspend(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('AudioContext suspend timeout')), 300))
+      ]);
+    } catch (e) {
+      console.warn('AudioContext suspend warning:', e);
+    }
+  }
+}
+
+async function resumePlayback() {
+  if (!isPlaying || !isPaused) return;
+  isPaused = false;
+  updatePlayPauseUI(true, false);
+  if ('mediaSession' in navigator) {
+    navigator.mediaSession.playbackState = 'playing';
+  }
+  if (audioCtx && (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted')) {
+    try {
+      await Promise.race([
+        audioCtx.resume(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('AudioContext resume timeout')), 300))
+      ]);
+    } catch (e) {
+      console.warn('AudioContext resume warning:', e);
+    }
+  }
+  startPlaybackMonitor();
+}
+
 // --- 5. Mobile Native Features: MediaSession & WakeLock ---
 function setupMediaSession() {
   if ('mediaSession' in navigator) {
@@ -696,18 +736,14 @@ function setupMediaSession() {
       ]
     });
 
+    navigator.mediaSession.playbackState = 'playing';
+
     navigator.mediaSession.setActionHandler('play', async () => {
-      if (audioCtx && audioCtx.state === 'suspended') {
-        await audioCtx.resume();
-        updatePlayPauseUI(true, false);
-      }
+      await resumePlayback();
     });
 
     navigator.mediaSession.setActionHandler('pause', async () => {
-      if (audioCtx && audioCtx.state === 'running') {
-        await audioCtx.suspend();
-        updatePlayPauseUI(true, true);
-      }
+      await pausePlayback();
     });
 
     navigator.mediaSession.setActionHandler('stop', () => {
@@ -750,11 +786,9 @@ function setupEventListeners() {
     if (!isPlaying) {
       await startPlayback();
     } else if (isPlaying && !isPaused) {
-      if (audioCtx) await audioCtx.suspend();
-      updatePlayPauseUI(true, true);
+      await pausePlayback();
     } else {
-      if (audioCtx) await audioCtx.resume();
-      updatePlayPauseUI(true, false);
+      await resumePlayback();
     }
   });
 
