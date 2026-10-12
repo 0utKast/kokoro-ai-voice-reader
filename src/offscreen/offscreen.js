@@ -26,7 +26,9 @@ let isPlaying = false;
 let isPaused = false;
 let activeSources = [];
 let nextStartTime = 0;
-let accumulatedBuffers = [];
+let pendingAudioQueue = [];
+const LOOKAHEAD_BUFFER_SEC = 45; // Max scheduled lookahead audio in Web Audio API (~2-3 chunks)
+const MAX_PENDING_QUEUE_CHUNKS = 8; // Backpressure limit to prevent memory bloat (~3-4 min of audio)
 let progressiveMp3Encoder = null;
 let currentVoice = DEFAULT_SETTINGS.selectedVoice;
 let currentSpeed = DEFAULT_SETTINGS.speed;
@@ -182,10 +184,8 @@ function stopAudioPlayback() {
   isPlaying = false;
   isPaused = false;
   isGenerationDone = false;
-  if (!isConversionComplete) {
-    accumulatedBuffers = [];
-    progressiveMp3Encoder = null;
-  }
+  pendingAudioQueue = [];
+  progressiveMp3Encoder = null;
   nextStartTime = 0;
   totalScheduledChunks = 0;
   completedChunks = 0;
@@ -198,6 +198,7 @@ function stopAudioPlayback() {
       src.onended = null;
       src.stop(0);
       src.disconnect();
+      src.buffer = null;
     } catch {}
   }
   activeSources = [];
@@ -236,7 +237,7 @@ async function playText(text, options = {}) {
 
   isPlaying = true;
   isPaused = false;
-  accumulatedBuffers = [];
+  pendingAudioQueue = [];
   progressiveMp3Encoder = new ProgressiveMp3Encoder(24000, 64);
   currentChunkTexts = [];
   currentActiveChunkIndex = -1;
@@ -295,11 +296,6 @@ async function playText(text, options = {}) {
         }
       }
 
-      // Keep limited memory buffer for short WAV fallback without risking GB-scale RAM bloat
-      if (accumulatedBuffers.length < 100) {
-        accumulatedBuffers.push(cleanPcm);
-      }
-
       chunkTexts.push(chunk.text);
       currentChunkTexts = chunkTexts;
 
@@ -322,11 +318,24 @@ async function playText(text, options = {}) {
         isConversionComplete: false
       }).catch(() => {});
 
-      const audioBuffer = ctx.createBuffer(1, cleanPcm.length, chunk.audio.sampling_rate || 24000);
-      audioBuffer.copyToChannel(cleanPcm, 0);
-
       const isParagraphEnd = splitter.chunkMetadata[chunkIndex]?.isParagraphEnd ?? false;
-      scheduleChunkPlayback(audioBuffer, chunkIndex++, chunk.text, isParagraphEnd);
+
+      // Enqueue chunk in pendingAudioQueue for just-in-time Web Audio allocation
+      pendingAudioQueue.push({
+        pcm: cleanPcm,
+        chunkIndex: chunkIndex++,
+        text: chunk.text,
+        isParagraphEnd,
+        sampleRate: chunk.audio.sampling_rate || 24000
+      });
+
+      // Schedule into Web Audio API if lookahead buffer needs filling
+      schedulePendingAudioChunks();
+
+      // Backpressure: If queue is already ahead by several minutes, pause generator to keep memory flat
+      while (pendingAudioQueue.length >= MAX_PENDING_QUEUE_CHUNKS && !abortGeneration && activeSessionId === sessionId) {
+        await new Promise(r => setTimeout(r, isPaused ? 300 : 150));
+      }
     }
 
     if (!abortGeneration && activeSessionId === sessionId) {
@@ -340,13 +349,6 @@ async function playText(text, options = {}) {
           mp3Blob = progressiveMp3Encoder.finish();
         } catch (encErr) {
           console.error('Error finalizando codificador progresivo MP3:', encErr);
-        }
-      }
-      if (!mp3Blob && accumulatedBuffers && accumulatedBuffers.length > 0) {
-        try {
-          mp3Blob = encodeMP3(accumulatedBuffers, 24000, 64);
-        } catch (encErr2) {
-          console.error('Fallback encodeMP3 falló:', encErr2);
         }
       }
 
@@ -409,7 +411,7 @@ async function playText(text, options = {}) {
     }
 
     // If all audio already finished playing before generation loop concluded
-    if (completedChunks >= totalScheduledChunks && activeSources.length === 0) {
+    if (completedChunks >= totalScheduledChunks && activeSources.length === 0 && pendingAudioQueue.length === 0) {
       isPlaying = false;
       chrome.runtime.sendMessage({
         type: MESSAGE_TYPES.PLAYBACK_STATE,
@@ -429,6 +431,69 @@ async function playText(text, options = {}) {
   }
 }
 
+function safeCreateAudioBuffer(ctx, channels, length, sampleRate = 24000) {
+  try {
+    return ctx.createBuffer(channels, length, sampleRate);
+  } catch (err) {
+    console.warn(`[Kokoro Audio] Falló createBuffer(${channels}, ${length}, ${sampleRate}). Intentando recuperación de memoria...`, err);
+    cleanupFinishedSources();
+
+    try {
+      return ctx.createBuffer(channels, length, sampleRate);
+    } catch (err2) {
+      console.error(`[Kokoro Audio] Reintento de createBuffer falló:`, err2);
+      if (ctx.state === 'closed') {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AudioContextClass({ sampleRate: 24000 });
+        gainNode = audioCtx.createGain();
+        gainNode.gain.value = currentVolume;
+        gainNode.connect(audioCtx.destination);
+        return audioCtx.createBuffer(channels, length, sampleRate);
+      }
+      throw err2;
+    }
+  }
+}
+
+function cleanupFinishedSources() {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  for (let i = activeSources.length - 1; i >= 0; i--) {
+    const src = activeSources[i];
+    if (src._endTime && src._endTime <= now) {
+      try {
+        src.onended = null;
+        src.stop(0);
+        src.disconnect();
+        src.buffer = null;
+      } catch {}
+      activeSources.splice(i, 1);
+    }
+  }
+}
+
+function schedulePendingAudioChunks() {
+  if (!isPlaying || isPaused || !audioCtx) return;
+  const ctx = getAudioContext();
+  cleanupFinishedSources();
+
+  while (pendingAudioQueue.length > 0) {
+    const bufferedAhead = nextStartTime - ctx.currentTime;
+    // Keep enough audio buffered in Web Audio API (~45s), but do not schedule far in advance to save memory
+    if (bufferedAhead >= LOOKAHEAD_BUFFER_SEC && activeSources.length >= 2) {
+      break;
+    }
+
+    const item = pendingAudioQueue.shift();
+    if (!item) break;
+
+    const audioBuffer = safeCreateAudioBuffer(ctx, 1, item.pcm.length, item.sampleRate || 24000);
+    audioBuffer.copyToChannel(item.pcm, 0);
+
+    scheduleChunkPlayback(audioBuffer, item.chunkIndex, item.text, item.isParagraphEnd);
+  }
+}
+
 function startPlaybackMonitor() {
   if (playbackMonitorInterval) return;
 
@@ -443,6 +508,12 @@ function startPlaybackMonitor() {
     }
 
     const t = audioCtx.currentTime;
+
+    // Check if we need to schedule more audio chunks from pendingAudioQueue
+    if (pendingAudioQueue.length > 0 && (nextStartTime - t) < LOOKAHEAD_BUFFER_SEC) {
+      schedulePendingAudioChunks();
+    }
+
     const startIndex = Math.max(0, currentActiveChunkIndex);
     for (let i = startIndex; i < scheduledChunks.length; i++) {
       const chunk = scheduledChunks[i];
@@ -484,6 +555,7 @@ function scheduleChunkPlayback(audioBuffer, chunkIndex, text, isParagraphEnd = f
   // Add a slight natural paragraph breath (200ms) only when paragraph ends; within paragraphs keep it seamless (15ms)
   nextStartTime = endTime + (isParagraphEnd ? 0.20 : 0.015);
 
+  source._endTime = endTime;
   activeSources.push(source);
 
   scheduledChunks.push({
@@ -508,11 +580,18 @@ function scheduleChunkPlayback(audioBuffer, chunkIndex, text, isParagraphEnd = f
   startPlaybackMonitor();
 
   source.onended = () => {
+    try {
+      source.disconnect();
+      source.buffer = null;
+    } catch {}
     completedChunks++;
     const idx = activeSources.indexOf(source);
     if (idx !== -1) activeSources.splice(idx, 1);
 
-    if (isGenerationDone && completedChunks >= totalScheduledChunks && activeSources.length === 0) {
+    // Keep filling audio lookahead buffer from the queue as chunks finish playing
+    schedulePendingAudioChunks();
+
+    if (isGenerationDone && pendingAudioQueue.length === 0 && completedChunks >= totalScheduledChunks && activeSources.length === 0) {
       isPlaying = false;
       isPaused = false;
       stopPlaybackMonitor();
@@ -605,6 +684,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (audioCtx && audioCtx.state === 'suspended') {
           await audioCtx.resume();
         }
+        schedulePendingAudioChunks();
         chrome.runtime.sendMessage({
           type: MESSAGE_TYPES.PLAYBACK_STATE,
           isPlaying: isPlaying,
@@ -653,9 +733,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (progressiveMp3Encoder && progressiveMp3Encoder.totalSamples > 0) {
               blob = progressiveMp3Encoder.finish();
               format = 'mp3';
-            } else if (accumulatedBuffers && accumulatedBuffers.length > 0) {
-              blob = encodeMP3(accumulatedBuffers, 24000, 64);
-              format = 'mp3';
             }
 
             if (blob && blob.size > 0) {
@@ -695,29 +772,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case "DOWNLOAD_WAV": {
-        if (!isConversionComplete) {
-          sendResponse({
-            error: `La conversión no ha finalizado todavía (${convertedChunks} de ${totalExpectedChunks} frases sintetizadas). Podrás descargar el archivo WAV cuando se complete el 100%.`
-          });
-          return;
-        }
-        if (!accumulatedBuffers || accumulatedBuffers.length === 0) {
-          sendResponse({ error: "No hay muestras WAV directas en memoria para descargar." });
-          return;
-        }
-        try {
-          const wavBlob = encodeWAV(accumulatedBuffers, 24000);
-          await saveAudioBlob('latest_wav_audio', wavBlob, { format: 'wav' });
-          sendResponse({
-            success: true,
-            storageKey: 'latest_wav_audio',
-            format: 'wav',
-            size: wavBlob.size
-          });
-        } catch (err) {
-          console.error('Error generando archivo WAV:', err);
-          sendResponse({ error: `Error preparando archivo WAV: ${err.message}` });
-        }
+        sendResponse({
+          error: "El formato de alta eficiencia predeterminado es MP3 para garantizar un consumo mínimo de memoria."
+        });
         break;
       }
 

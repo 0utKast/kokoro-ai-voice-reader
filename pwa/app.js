@@ -70,6 +70,9 @@ let isPlaying = false;
 let isPaused = false;
 let activeSources = [];
 let nextStartTime = 0;
+let pendingAudioQueue = [];
+const LOOKAHEAD_BUFFER_SEC = 45; // Max scheduled lookahead audio in Web Audio API (~2-3 chunks)
+const MAX_PENDING_QUEUE_CHUNKS = 8; // Backpressure limit to prevent memory bloat (~3-4 min of audio)
 let progressiveMp3Encoder = null;
 let currentVoice = DEFAULT_SETTINGS.selectedVoice;
 let currentSpeed = DEFAULT_SETTINGS.speed;
@@ -401,6 +404,7 @@ function stopAudioPlayback() {
   abortGeneration = true;
   isPlaying = false;
   isPaused = false;
+  pendingAudioQueue = [];
   nextStartTime = 0;
   activeChunkIndex = -1;
   scheduledChunks = [];
@@ -412,6 +416,7 @@ function stopAudioPlayback() {
       src.onended = null;
       src.stop(0);
       src.disconnect();
+      src.buffer = null;
     } catch {}
   }
   activeSources = [];
@@ -444,6 +449,7 @@ async function startPlayback() {
 
   isPlaying = true;
   isPaused = false;
+  pendingAudioQueue = [];
   progressiveMp3Encoder = new ProgressiveMp3Encoder(24000, 64);
   currentChunks = [];
   activeChunkIndex = 0;
@@ -508,11 +514,24 @@ async function startPlayback() {
 
       renderKaraokeChunks(chunkTexts);
 
-      const audioBuffer = ctx.createBuffer(1, cleanPcm.length, chunk.audio.sampling_rate || 24000);
-      audioBuffer.copyToChannel(cleanPcm, 0);
-
       const isParagraphEnd = splitter.chunkMetadata[chunkIndex]?.isParagraphEnd ?? false;
-      scheduleChunkPlayback(audioBuffer, chunkIndex++, chunk.text, isParagraphEnd);
+
+      // Queue chunk for just-in-time Web Audio allocation
+      pendingAudioQueue.push({
+        pcm: cleanPcm,
+        chunkIndex: chunkIndex++,
+        text: chunk.text,
+        isParagraphEnd,
+        sampleRate: chunk.audio.sampling_rate || 24000
+      });
+
+      // Schedule into Web Audio API if lookahead buffer needs filling
+      schedulePendingAudioChunks();
+
+      // Backpressure: If queue is already ahead by several minutes, pause generator to keep memory flat
+      while (pendingAudioQueue.length >= MAX_PENDING_QUEUE_CHUNKS && !abortGeneration && activeSessionId === sessionId) {
+        await new Promise(r => setTimeout(r, isPaused ? 300 : 150));
+      }
     }
 
     if (!abortGeneration && activeSessionId === sessionId) {
@@ -566,6 +585,69 @@ async function startPlayback() {
   }
 }
 
+function safeCreateAudioBuffer(ctx, channels, length, sampleRate = 24000) {
+  try {
+    return ctx.createBuffer(channels, length, sampleRate);
+  } catch (err) {
+    console.warn(`[PWA Kokoro Audio] Falló createBuffer(${channels}, ${length}, ${sampleRate}). Intentando recuperación de memoria...`, err);
+    cleanupFinishedSources();
+
+    try {
+      return ctx.createBuffer(channels, length, sampleRate);
+    } catch (err2) {
+      console.error(`[PWA Kokoro Audio] Reintento de createBuffer falló:`, err2);
+      if (ctx.state === 'closed') {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AudioContextClass();
+        gainNode = audioCtx.createGain();
+        gainNode.gain.value = currentVolume;
+        gainNode.connect(audioCtx.destination);
+        return audioCtx.createBuffer(channels, length, sampleRate);
+      }
+      throw err2;
+    }
+  }
+}
+
+function cleanupFinishedSources() {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  for (let i = activeSources.length - 1; i >= 0; i--) {
+    const src = activeSources[i];
+    if (src._endTime && src._endTime <= now) {
+      try {
+        src.onended = null;
+        src.stop(0);
+        src.disconnect();
+        src.buffer = null;
+      } catch {}
+      activeSources.splice(i, 1);
+    }
+  }
+}
+
+function schedulePendingAudioChunks() {
+  if (!isPlaying || isPaused || !audioCtx) return;
+  const ctx = getAudioContext();
+  cleanupFinishedSources();
+
+  while (pendingAudioQueue.length > 0) {
+    const bufferedAhead = nextStartTime - ctx.currentTime;
+    // Keep enough audio buffered in Web Audio API (~45s), but do not schedule far in advance to save memory
+    if (bufferedAhead >= LOOKAHEAD_BUFFER_SEC && activeSources.length >= 2) {
+      break;
+    }
+
+    const item = pendingAudioQueue.shift();
+    if (!item) break;
+
+    const audioBuffer = safeCreateAudioBuffer(ctx, 1, item.pcm.length, item.sampleRate || 24000);
+    audioBuffer.copyToChannel(item.pcm, 0);
+
+    scheduleChunkPlayback(audioBuffer, item.chunkIndex, item.text, item.isParagraphEnd);
+  }
+}
+
 function scheduleChunkPlayback(audioBuffer, chunkIndex, text, isParagraphEnd = false) {
   const ctx = getAudioContext();
   const source = ctx.createBufferSource();
@@ -579,6 +661,7 @@ function scheduleChunkPlayback(audioBuffer, chunkIndex, text, isParagraphEnd = f
   const endTime = startTime + duration;
   nextStartTime = endTime + (isParagraphEnd ? 0.20 : 0.015);
 
+  source._endTime = endTime;
   activeSources.push(source);
   scheduledChunks.push({ chunkIndex, startTime, endTime, duration, text });
 
@@ -589,10 +672,17 @@ function scheduleChunkPlayback(audioBuffer, chunkIndex, text, isParagraphEnd = f
   startPlaybackMonitor();
 
   source.onended = () => {
+    try {
+      source.disconnect();
+      source.buffer = null;
+    } catch {}
     const idx = activeSources.indexOf(source);
     if (idx !== -1) activeSources.splice(idx, 1);
 
-    if (isConversionComplete && activeSources.length === 0) {
+    // Keep filling audio lookahead buffer from the queue as chunks finish playing
+    schedulePendingAudioChunks();
+
+    if (isConversionComplete && pendingAudioQueue.length === 0 && activeSources.length === 0) {
       isPlaying = false;
       isPaused = false;
       stopPlaybackMonitor();
@@ -608,6 +698,12 @@ function startPlaybackMonitor() {
   playbackMonitorInterval = setInterval(() => {
     if (!isPlaying || isPaused || !audioCtx) return;
     const t = audioCtx.currentTime;
+
+    // Check if we need to schedule more audio chunks from pendingAudioQueue
+    if (pendingAudioQueue.length > 0 && (nextStartTime - t) < LOOKAHEAD_BUFFER_SEC) {
+      schedulePendingAudioChunks();
+    }
+
     for (let i = 0; i < scheduledChunks.length; i++) {
       const c = scheduledChunks[i];
       if (t >= c.startTime && t < c.endTime) {
@@ -861,6 +957,7 @@ async function resumePlayback() {
     }
   }
   startPlaybackMonitor();
+  schedulePendingAudioChunks();
 }
 
 // --- 5. Mobile Native Features: MediaSession & WakeLock ---

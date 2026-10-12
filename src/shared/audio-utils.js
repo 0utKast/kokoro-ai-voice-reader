@@ -219,7 +219,8 @@ export function trimAudioSilence(pcm, sampleRate = 24000, maxLeadMs = 20, maxTra
   const finalStart = Math.max(0, start - maxLead);
   const finalEnd = Math.min(pcm.length, end + 1 + maxTrail);
 
-  return pcm.subarray(finalStart, finalEnd);
+  // Return a tightly-sliced Float32Array so the neural model's underlying tensor ArrayBuffer can be garbage-collected immediately
+  return pcm.slice(finalStart, finalEnd);
 }
 
 /**
