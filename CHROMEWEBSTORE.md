@@ -99,7 +99,9 @@ English
 **Publisher Name** [REQUIRED]: 0utKast  
 **Contact Email** [REQUIRED]: outkast@local.dev  
 **Support URL**: https://github.com/0utKast/kokoro-ai-voice-reader/issues  
-**Homepage URL**: https://github.com/0utKast/kokoro-ai-voice-reader
+**Homepage URL**: https://github.com/0utKast/kokoro-ai-voice-reader  
+**Store URL**: https://chromewebstore.google.com/detail/kokoro-ai-voice-reader-%E2%80%94/jioagkmbblfbklkmmpalloocfdbefpab  
+**Extension ID**: `jioagkmbblfbklkmmpalloocfdbefpab`
 
 ---
 

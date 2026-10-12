@@ -1,5 +1,6 @@
 # Kokoro AI Voice Reader 🚀 (WebGPU Chrome Extension)
 
+[![Chrome Web Store](https://img.shields.io/badge/Chrome_Web_Store-Disponible-4285F4?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/kokoro-ai-voice-reader-%E2%80%94/jioagkmbblfbklkmmpalloocfdbefpab)
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-brightgreen.svg)](https://developer.chrome.com/docs/extensions/mv3/intro/)
 [![WebGPU Accelerated](https://img.shields.io/badge/WebGPU-Hardware_Accelerated-blue.svg)](https://www.w3.org/TR/webgpu/)
 [![Model: Kokoro-82M](https://img.shields.io/badge/Model-Kokoro--82M-purple.svg)](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX)
@@ -7,7 +8,9 @@
 [![Privacy: 100% Local](https://img.shields.io/badge/Privacy-100%25_Local_&_Offline-success.svg)](#privacidad-y-seguridad)
 
 > **Lector inteligente de PDFs, libros extensos y textos con voces humanas ultra-naturales Kokoro-82M, acelerado por hardware mediante WebGPU y WGSL directamente en tu navegador.**  
-> 100% privado, sin servidores externos, sin suscripciones a la nube y con streaming de audio inmediato.
+> 100% privado, sin servidores externos, sin suscripciones a la nube y con streaming de audio inmediato.  
+>  
+> 🛒 **Extensión Oficial Publicada:** Puedes instalarla directamente desde la [**Chrome Web Store**](https://chromewebstore.google.com/detail/kokoro-ai-voice-reader-%E2%80%94/jioagkmbblfbklkmmpalloocfdbefpab) con un solo clic.
 
 ---
 
@@ -38,13 +41,23 @@
 
 ---
 
-## 🛠️ Instalación en Google Chrome (Modo Desarrollador)
+## 🛠️ Opciones de Instalación
+
+### Opción 1: Instalación Oficial desde Chrome Web Store (Recomendada) 🛒
+Puedes instalar la versión verificada directamente desde la tienda oficial con un solo clic y recibir actualizaciones automáticas:
+
+👉 [**Instalar Kokoro AI Voice Reader en Chrome Web Store**](https://chromewebstore.google.com/detail/kokoro-ai-voice-reader-%E2%80%94/jioagkmbblfbklkmmpalloocfdbefpab)
+
+---
+
+### Opción 2: Instalación Manual desde el Código Fuente (Modo Desarrollador) 💻
+Si prefieres compilar, auditar o ejecutar la última versión localmente:
 
 1. **Clona o descarga este repositorio:**
    ```bash
    git clone https://github.com/0utKast/kokoro-ai-voice-reader.git
    ```
-2. Abre Google Chrome y entra en:
+2. Abre Google Chrome y navega a:
    ```
    chrome://extensions/
    ```
