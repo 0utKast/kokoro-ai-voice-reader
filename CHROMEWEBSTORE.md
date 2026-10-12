@@ -1,6 +1,6 @@
 # Chrome Web Store Listing — Kokoro AI Voice Reader
 
-> Last Updated: 2026-10-05
+> Last Updated: 2026-10-12
 
 ## Store Listing
 
@@ -106,7 +106,9 @@ English
 ## Version History
 
 | Version | Date | Changes | Status |
-| 1.1.5 | 2026-10-05 | Fixed bottom controls dock (player playback controls, reading progress, and WebGPU transcription percentage) so they remain permanently pinned and visible without jumping or disappearing during playback. Isolated vertical scrolling strictly within the reading/karaoke area, preventing long texts from pushing controls out of view and ensuring zero-jitter paragraph transitions. | Ready for Submission |
+| 1.1.7 | 2026-10-12 | Resolved `createBuffer` memory exhaustion (OOM crash) during long text/audiobook synthesis using a streaming lookahead audio queue (45s window), bounded backpressure, and strict tensor memory isolation (`pcm.slice()`). Restructured karaoke UI into continuous cohesive paragraphs with smooth auto-scroll and maximized reading canvas. Hardened node disconnection and garbage collection. | Ready for Submission |
+| 1.1.6 | 2026-10-08 | Fixed MP3 download button state recovery and persistent audio caching across popup closures; added cross-device mobile PWA support with WebGPU inference, MediaSession controls, and local HTTPS development server. | Superseded |
+| 1.1.5 | 2026-10-05 | Fixed bottom controls dock (player playback controls, reading progress, and WebGPU transcription percentage) so they remain permanently pinned and visible without jumping or disappearing during playback. Isolated vertical scrolling strictly within the reading/karaoke area, preventing long texts from pushing controls out of view and ensuring zero-jitter paragraph transitions. | Superseded |
 | 1.1.4 | 2026-10-05 | Solved full audiobook MP3 export for long documents using progressive streaming encoding and temporary IndexedDB storage (bypassing Chrome 64MB IPC message limits). Improved karaoke sentence synchronization with incremental rendering and resolved pause/resume timing drift. | Published / Approved |
 | 1.1.3 | 2026-10-02 | Added user preference toggle to enable/disable floating selection quick-action pill (disabled by default to prevent intrusion), fixed playback execution when clicking the quick-action pill via unified service worker offscreen orchestration, improved pill positioning and avoided editable input fields. | Published / Approved |
 | 1.1.2 | 2026-09-28 | Fixed unnatural mid-sentence phrasing pauses with smart sentence grouping, fixed MP3 download execution via native chrome.downloads API, and added explicit downloads permission. | Superseded |
