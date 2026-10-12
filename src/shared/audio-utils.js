@@ -129,6 +129,7 @@ export function splitTextIntoSmartChunks(text, {
               if (currentChunk.trim()) {
                 chunks.push({
                   text: currentChunk.trim(),
+                  paragraphIndex: pIdx,
                   isParagraphEnd: false,
                   wordCount: currentChunk.trim().split(/\s+/).filter(Boolean).length
                 });
@@ -145,6 +146,7 @@ export function splitTextIntoSmartChunks(text, {
         } else {
           chunks.push({
             text: currentChunk.trim(),
+            paragraphIndex: pIdx,
             isParagraphEnd: false,
             wordCount: currentChunk.trim().split(/\s+/).filter(Boolean).length
           });
@@ -156,6 +158,7 @@ export function splitTextIntoSmartChunks(text, {
     if (currentChunk.trim()) {
       chunks.push({
         text: currentChunk.trim(),
+        paragraphIndex: pIdx,
         isParagraphEnd: true,
         wordCount: currentChunk.trim().split(/\s+/).filter(Boolean).length
       });

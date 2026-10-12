@@ -5,7 +5,7 @@
 import { KOKORO_VOICES, MESSAGE_TYPES, DEFAULT_SETTINGS } from '../shared/constants.js';
 import { getSettings, saveSettings } from '../shared/storage.js';
 import { extractTextFromPDF } from '../shared/pdf-extractor.js';
-import { normalizeTextForSpeech } from '../shared/audio-utils.js';
+import { normalizeTextForSpeech, splitTextIntoSmartChunks } from '../shared/audio-utils.js';
 import { getAudioBlob, clearAudioBlobs } from '../shared/audio-storage.js';
 
 // Document & Audio state
@@ -33,6 +33,10 @@ const fileInput = document.getElementById('file-input');
 const btnClearText = document.getElementById('btn-clear-text');
 const btnDownloadAudio = document.getElementById('btn-download-mp3') || document.getElementById('btn-download-wav');
 const btnDownloadText = document.getElementById('btn-download-text');
+const btnEditMode = document.getElementById('btn-edit-mode');
+const fontSizeControls = document.getElementById('font-size-controls');
+const btnFontSmaller = document.getElementById('btn-font-smaller');
+const btnFontLarger = document.getElementById('btn-font-larger');
 
 const btnPlayPause = document.getElementById('btn-play-pause');
 const iconPlay = document.getElementById('icon-play');
@@ -53,17 +57,36 @@ let currentChunks = [];
 let activeChunkIndex = 0;
 let totalExpectedChunks = 0;
 let isConversionComplete = false;
+let currentKaraokeFontSize = 14.5;
 
 // 1. Initialization
 async function init() {
   await loadAndRenderVoices();
   await loadSavedSettings();
+  await loadSavedFontSize();
   await checkHardwareStatus();
   const isPlayingActive = await syncPlaybackState();
   if (!isPlayingActive) {
     await restoreLastConversion();
   }
   setupEventListeners();
+}
+
+async function loadSavedFontSize() {
+  try {
+    const data = await chrome.storage.local.get('kokoro_karaoke_font_size');
+    if (data?.kokoro_karaoke_font_size) {
+      setKaraokeFontSize(data.kokoro_karaoke_font_size);
+    }
+  } catch {}
+}
+
+function setKaraokeFontSize(size) {
+  currentKaraokeFontSize = Math.max(12, Math.min(22, size));
+  document.documentElement.style.setProperty('--karaoke-font-size', `${currentKaraokeFontSize}px`);
+  try {
+    chrome.storage.local.set({ kokoro_karaoke_font_size: currentKaraokeFontSize });
+  } catch {}
 }
 
 async function syncPlaybackState() {
@@ -220,20 +243,29 @@ function updatePlayPauseUI(playing, paused) {
   isPaused = paused;
 
   if (playing && !paused) {
+    document.body.classList.add('karaoke-active');
     iconPlay.classList.add('hidden');
     iconPause.classList.remove('hidden');
     textInput.classList.add('hidden');
     karaokeDisplay.classList.remove('hidden');
     playbackStatusBar.classList.remove('hidden');
+    btnEditMode?.classList.remove('hidden');
+    fontSizeControls?.classList.remove('hidden');
   } else if (playing && paused) {
+    document.body.classList.add('karaoke-active');
     iconPlay.classList.remove('hidden');
     iconPause.classList.add('hidden');
+    btnEditMode?.classList.remove('hidden');
+    fontSizeControls?.classList.remove('hidden');
   } else {
     // Stopped
+    document.body.classList.remove('karaoke-active');
     iconPlay.classList.remove('hidden');
     iconPause.classList.add('hidden');
     textInput.classList.remove('hidden');
     karaokeDisplay.classList.add('hidden');
+    btnEditMode?.classList.add('hidden');
+    fontSizeControls?.classList.add('hidden');
     if (!isConversionComplete) {
       playbackStatusBar.classList.add('hidden');
     }
@@ -302,89 +334,138 @@ function renderKaraokeChunks(chunks) {
     return;
   }
 
-  const existingCount = karaokeChunksContainer.children.length;
-
-  // Si es una actualización incremental de la sesión actual (añadiendo nuevas frases generadas)
-  if (existingCount > 0 && chunks.length >= existingCount && currentChunks[0] === chunks[0]) {
-    if (chunks.length > existingCount) {
-      const fragment = document.createDocumentFragment();
-      for (let idx = existingCount; idx < chunks.length; idx++) {
-        const p = document.createElement('div');
-        p.className = 'karaoke-chunk';
-        p.dataset.index = idx;
-        p.textContent = chunks[idx];
-        fragment.appendChild(p);
-      }
-      karaokeChunksContainer.appendChild(fragment);
-    }
+  // If already rendered with identical count and chunks, keep existing DOM to prevent re-render flicker
+  const existingChunksCount = karaokeChunksContainer.querySelectorAll('.karaoke-chunk').length;
+  if (existingChunksCount > 0 && existingChunksCount === chunks.length && currentChunks.length === chunks.length) {
     currentChunks = chunks;
-
-    // Garantizar que la frase actualmente en reproducción mantenga el resaltado sin parpadeos
-    if (typeof activeChunkIndex === 'number' && karaokeChunksContainer.children[activeChunkIndex]) {
-      const activeEl = karaokeChunksContainer.children[activeChunkIndex];
-      if (!activeEl.classList.contains('active-chunk')) {
+    if (typeof activeChunkIndex === 'number') {
+      const activeEl = karaokeChunksContainer.querySelector(`.karaoke-chunk[data-index="${activeChunkIndex}"]`);
+      if (activeEl && !activeEl.classList.contains('active-chunk')) {
         activeEl.classList.add('active-chunk');
       }
     }
     return;
   }
 
-  // Renderizado completo (nueva reproducción o cambio de documento)
-  karaokeChunksContainer.innerHTML = '';
   currentChunks = chunks;
 
-  const fragment = document.createDocumentFragment();
-  chunks.forEach((chunkText, idx) => {
-    const p = document.createElement('div');
-    p.className = 'karaoke-chunk' + (idx === activeChunkIndex ? ' active-chunk' : '');
-    p.dataset.index = idx;
-    p.textContent = chunkText;
-    fragment.appendChild(p);
+  // Group chunks into paragraphs to preserve continuous reading flow
+  const paragraphsMap = new Map();
+  let currentP = 0;
+
+  chunks.forEach((chunk, idx) => {
+    const text = typeof chunk === 'string' ? chunk : (chunk?.text || '');
+    let pIdx;
+    if (typeof chunk === 'object' && typeof chunk.paragraphIndex === 'number') {
+      pIdx = chunk.paragraphIndex;
+    } else {
+      pIdx = currentP;
+      if (typeof chunk === 'object' && chunk.isParagraphEnd) {
+        currentP++;
+      }
+    }
+
+    if (!paragraphsMap.has(pIdx)) {
+      paragraphsMap.set(pIdx, []);
+    }
+    paragraphsMap.get(pIdx).push({ text, index: idx });
   });
+
+  karaokeChunksContainer.innerHTML = '';
+  const fragment = document.createDocumentFragment();
+
+  for (const [pIdx, chunkList] of paragraphsMap.entries()) {
+    const pEl = document.createElement('p');
+    pEl.className = 'karaoke-paragraph';
+    pEl.dataset.paragraph = pIdx;
+
+    chunkList.forEach(({ text, index }, i) => {
+      const span = document.createElement('span');
+      span.className = 'karaoke-chunk' + (index === activeChunkIndex ? ' active-chunk' : '');
+      span.dataset.index = index;
+      span.textContent = text;
+      pEl.appendChild(span);
+
+      // Add a single space between chunks in the same paragraph for natural continuous prose
+      if (i < chunkList.length - 1) {
+        pEl.appendChild(document.createTextNode(' '));
+      }
+    });
+
+    fragment.appendChild(pEl);
+  }
+
   karaokeChunksContainer.appendChild(fragment);
 
   const total = totalExpectedChunks || currentChunks.length || 1;
-  currentChunkBadge.textContent = `🔊 Frase ${activeChunkIndex + 1} de ${total}`;
+  if (currentChunkBadge) {
+    currentChunkBadge.textContent = `🔊 Frase ${activeChunkIndex + 1} de ${total}`;
+  }
 
-  if (typeof activeChunkIndex === 'number' && karaokeChunksContainer.children[activeChunkIndex]) {
-    scrollChunkIntoView(karaokeChunksContainer.children[activeChunkIndex]);
+  const activeEl = karaokeChunksContainer.querySelector(`.karaoke-chunk[data-index="${activeChunkIndex}"]`);
+  if (activeEl) {
+    scrollChunkIntoView(activeEl);
   }
 }
 
 function scrollChunkIntoView(el) {
-  if (!el) return;
-  if (karaokeDisplay && karaokeDisplay.clientHeight > 0) {
-    const containerRect = karaokeDisplay.getBoundingClientRect();
-    const elRect = el.getBoundingClientRect();
-    const relativeTop = elRect.top - containerRect.top + karaokeDisplay.scrollTop;
-    const targetScrollTop = relativeTop - (karaokeDisplay.clientHeight / 2) + (elRect.height / 2);
-    karaokeDisplay.scrollTo({
-      top: Math.max(0, targetScrollTop),
-      behavior: 'smooth'
-    });
-  } else {
-    try {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    } catch {}
+  if (!el || !karaokeDisplay) return;
+
+  const containerRect = karaokeDisplay.getBoundingClientRect();
+  const elRect = el.getBoundingClientRect();
+  const pEl = el.closest('.karaoke-paragraph') || el;
+  const pRect = pEl.getBoundingClientRect();
+
+  // Generous comfort bounds inside the container
+  const topComfortMargin = 35;
+  const bottomComfortMargin = 45;
+
+  // Check if active chunk is already comfortably visible
+  const isChunkComfortablyVisible = (
+    elRect.top >= containerRect.top + topComfortMargin &&
+    elRect.bottom <= containerRect.bottom - bottomComfortMargin
+  );
+
+  if (isChunkComfortablyVisible) {
+    return;
   }
+
+  // Scroll to bring the paragraph or chunk comfortably into view near the upper portion
+  const fitsEntireParagraph = (pRect.height <= containerRect.clientHeight * 0.75);
+  const targetRect = fitsEntireParagraph ? pRect : elRect;
+
+  const relativeTop = targetRect.top - containerRect.top + karaokeDisplay.scrollTop;
+  const targetScrollTop = Math.max(0, relativeTop - 30); // 30px breathing room from top
+
+  karaokeDisplay.scrollTo({
+    top: targetScrollTop,
+    behavior: 'smooth'
+  });
 }
 
 function setActiveKaraokeChunk(index) {
   activeChunkIndex = index;
-  const chunkElements = karaokeChunksContainer.children;
+  const chunkSpans = karaokeChunksContainer.querySelectorAll('.karaoke-chunk');
 
-  for (let idx = 0; idx < chunkElements.length; idx++) {
-    const el = chunkElements[idx];
+  let activeEl = null;
+  chunkSpans.forEach(span => {
+    const idx = parseInt(span.dataset.index, 10);
     if (idx === index) {
-      el.classList.add('active-chunk');
-      scrollChunkIntoView(el);
+      span.classList.add('active-chunk');
+      activeEl = span;
     } else {
-      el.classList.remove('active-chunk');
+      span.classList.remove('active-chunk');
     }
+  });
+
+  if (activeEl) {
+    scrollChunkIntoView(activeEl);
   }
 
   const total = totalExpectedChunks || currentChunks.length || 1;
-  currentChunkBadge.textContent = `🔊 Frase ${index + 1} de ${total}`;
+  if (currentChunkBadge) {
+    currentChunkBadge.textContent = `🔊 Frase ${index + 1} de ${total}`;
+  }
 }
 
 // 3. User Actions
@@ -400,8 +481,19 @@ async function startPlayback() {
   isConversionComplete = false;
   totalExpectedChunks = 0;
   activeChunkIndex = 0;
-  currentChunks = [];
-  karaokeChunksContainer.innerHTML = '';
+
+  // Pre-split text and render full structured paragraphs immediately
+  const preChunks = splitTextIntoSmartChunks(text, {
+    firstChunkTarget: 200,
+    normalChunkTarget: 350,
+    maxChunkLimit: 450
+  });
+
+  currentChunks = preChunks;
+  totalExpectedChunks = preChunks.length;
+  renderKaraokeChunks(preChunks);
+  setActiveKaraokeChunk(0);
+
   btnDownloadAudio.disabled = true;
   btnDownloadAudio.classList.remove('btn-download-ready');
   if (btnDownloadText) btnDownloadText.textContent = 'Descargar MP3';
@@ -476,6 +568,56 @@ function setupEventListeners() {
   btnStop.addEventListener('click', async () => {
     await stopPlayback();
   });
+
+  // Previous chunk button
+  if (btnPrevChunk) {
+    btnPrevChunk.addEventListener('click', () => {
+      if (activeChunkIndex > 0) {
+        setActiveKaraokeChunk(activeChunkIndex - 1);
+      }
+    });
+  }
+
+  // Next chunk button
+  if (btnNextChunk) {
+    btnNextChunk.addEventListener('click', () => {
+      const total = totalExpectedChunks || currentChunks.length || 0;
+      if (activeChunkIndex < total - 1) {
+        setActiveKaraokeChunk(activeChunkIndex + 1);
+      }
+    });
+  }
+
+  // Click on any karaoke chunk to highlight/jump
+  if (karaokeChunksContainer) {
+    karaokeChunksContainer.addEventListener('click', (e) => {
+      const chunkSpan = e.target.closest('.karaoke-chunk');
+      if (!chunkSpan || chunkSpan.dataset.index === undefined) return;
+      const idx = parseInt(chunkSpan.dataset.index, 10);
+      if (!isNaN(idx) && idx >= 0 && idx < currentChunks.length) {
+        setActiveKaraokeChunk(idx);
+      }
+    });
+  }
+
+  // Switch back to edit mode button
+  if (btnEditMode) {
+    btnEditMode.addEventListener('click', async () => {
+      await stopPlayback();
+    });
+  }
+
+  // Font size buttons
+  if (btnFontSmaller) {
+    btnFontSmaller.addEventListener('click', () => {
+      setKaraokeFontSize(currentKaraokeFontSize - 1);
+    });
+  }
+  if (btnFontLarger) {
+    btnFontLarger.addEventListener('click', () => {
+      setKaraokeFontSize(currentKaraokeFontSize + 1);
+    });
+  }
 
   // Voice selector
   voiceSelect.addEventListener('change', async (e) => {

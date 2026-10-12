@@ -72,6 +72,14 @@
         Limpiar
       </button>
 
+      <button id="btn-edit-mode" class="btn btn-secondary btn-sm hidden" title="Volver al editor de texto">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 20h9"></path>
+          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+        </svg>
+        <span>Editar Texto</span>
+      </button>
+
       <button id="btn-download-mp3" class="btn btn-ghost btn-sm" title="Descargar audio MP3 completo y ligero (disponible al 100% de la conversión)" disabled>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
@@ -80,6 +88,11 @@
         </svg>
         <span id="btn-download-text">Descargar MP3</span>
       </button>
+
+      <div id="font-size-controls" class="font-size-group hidden">
+        <button id="btn-font-smaller" class="btn-icon-subtle" title="Reducir tamaño de letra">A-</button>
+        <button id="btn-font-larger" class="btn-icon-subtle" title="Aumentar tamaño de letra">A+</button>
+      </div>
     </section>
 
     <!-- Reading / Text Area -->

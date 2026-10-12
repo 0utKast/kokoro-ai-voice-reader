@@ -40,6 +40,7 @@ let isConversionComplete = false;
 let totalExpectedChunks = 0;
 let convertedChunks = 0;
 let currentChunkTexts = [];
+let currentSmartChunks = [];
 let currentActiveChunkIndex = -1;
 let scheduledChunks = [];
 let playbackMonitorInterval = null;
@@ -251,6 +252,7 @@ async function playText(text, options = {}) {
     normalChunkTarget: 350,
     maxChunkLimit: 450
   });
+  currentSmartChunks = smartChunks;
 
   const splitter = new SmartTextSplitter(smartChunks);
   totalExpectedChunks = smartChunks.length;
@@ -262,6 +264,7 @@ async function playText(text, options = {}) {
     conversionProgress: 0,
     convertedChunks: 0,
     totalExpectedChunks: totalExpectedChunks,
+    chunks: currentSmartChunks,
     isConversionComplete: false
   }).catch(() => {});
 
@@ -312,7 +315,7 @@ async function playText(text, options = {}) {
         isPlaying: isPlaying,
         isPaused: isPaused,
         totalChunks: totalScheduledChunks,
-        chunks: chunkTexts,
+        chunks: currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts,
         conversionProgress: conversionPct,
         convertedChunks: convertedChunks,
         totalExpectedChunks: totalExpectedChunks,
@@ -357,7 +360,7 @@ async function playText(text, options = {}) {
           updatedAt: Date.now(),
           title: options.title || '',
           text: text,
-          chunks: chunkTexts,
+          chunks: currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts,
           voice: currentVoice,
           speed: currentSpeed
         };
@@ -380,7 +383,7 @@ async function playText(text, options = {}) {
               duration: duration,
               title: metadata.title,
               text: text,
-              chunks: chunkTexts,
+              chunks: currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts,
               totalChunks: totalScheduledChunks,
               voice: currentVoice,
               speed: currentSpeed,
@@ -536,7 +539,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           isPlaying: isPlaying,
           isPaused: isPaused,
           totalChunks: totalScheduledChunks,
-          chunks: currentChunkTexts,
+          chunks: currentSmartChunks.length > 0 ? currentSmartChunks : currentChunkTexts,
           chunkIndex: currentActiveChunkIndex,
           totalExpectedChunks: totalExpectedChunks,
           convertedChunks: convertedChunks,

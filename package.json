@@ -8,7 +8,7 @@
     "package": "rm -f dist/kokoro-ai-extension.zip && zip -r dist/kokoro-ai-extension.zip manifest.json icons src -x '*.DS_Store*'",
     "pwa": "node scripts/pwa-server.js",
     "pwa:dev": "node scripts/pwa-server.js",
-    "test": "node tests/test-mp3-download.js && node tests/test-persistence.js"
+    "test": "node tests/test-mp3-download.js && node tests/test-persistence.js && node tests/test-karaoke-paragraphs.js"
   },
   "keywords": [
     "chrome-extension",

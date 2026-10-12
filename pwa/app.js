@@ -692,60 +692,136 @@ function updateConversionUI(info) {
 }
 
 function renderKaraokeChunks(chunks) {
-  if (!Array.isArray(chunks) || chunks.length === 0) return;
-  const existingCount = karaokeChunksContainer.children.length;
+  if (!Array.isArray(chunks) || chunks.length === 0) {
+    karaokeChunksContainer.innerHTML = '';
+    currentChunks = [];
+    return;
+  }
 
-  if (existingCount > 0 && chunks.length >= existingCount && currentChunks[0] === chunks[0]) {
-    if (chunks.length > existingCount) {
-      const fragment = document.createDocumentFragment();
-      for (let i = existingCount; i < chunks.length; i++) {
-        const div = document.createElement('div');
-        div.className = 'karaoke-chunk';
-        div.textContent = chunks[i];
-        div.dataset.index = i;
-        fragment.appendChild(div);
+  const existingChunksCount = karaokeChunksContainer.querySelectorAll('.karaoke-chunk').length;
+  if (existingChunksCount > 0 && existingChunksCount === chunks.length && currentChunks.length === chunks.length) {
+    currentChunks = chunks;
+    if (typeof activeChunkIndex === 'number') {
+      const activeEl = karaokeChunksContainer.querySelector(`.karaoke-chunk[data-index="${activeChunkIndex}"]`);
+      if (activeEl && !activeEl.classList.contains('active-chunk')) {
+        activeEl.classList.add('active-chunk');
       }
-      karaokeChunksContainer.appendChild(fragment);
     }
     return;
   }
 
+  currentChunks = chunks;
+
+  // Group chunks into paragraphs to preserve continuous reading flow
+  const paragraphsMap = new Map();
+  let currentP = 0;
+
+  chunks.forEach((chunk, idx) => {
+    const text = typeof chunk === 'string' ? chunk : (chunk?.text || '');
+    let pIdx;
+    if (typeof chunk === 'object' && typeof chunk.paragraphIndex === 'number') {
+      pIdx = chunk.paragraphIndex;
+    } else {
+      pIdx = currentP;
+      if (typeof chunk === 'object' && chunk.isParagraphEnd) {
+        currentP++;
+      }
+    }
+
+    if (!paragraphsMap.has(pIdx)) {
+      paragraphsMap.set(pIdx, []);
+    }
+    paragraphsMap.get(pIdx).push({ text, index: idx });
+  });
+
   karaokeChunksContainer.innerHTML = '';
   const fragment = document.createDocumentFragment();
-  chunks.forEach((chunkText, idx) => {
-    const div = document.createElement('div');
-    div.className = 'karaoke-chunk' + (idx === activeChunkIndex ? ' active-chunk' : '');
-    div.dataset.index = idx;
-    div.textContent = chunkText;
-    fragment.appendChild(div);
-  });
+
+  for (const [pIdx, chunkList] of paragraphsMap.entries()) {
+    const pEl = document.createElement('p');
+    pEl.className = 'karaoke-paragraph';
+    pEl.dataset.paragraph = pIdx;
+
+    chunkList.forEach(({ text, index }, i) => {
+      const span = document.createElement('span');
+      span.className = 'karaoke-chunk' + (index === activeChunkIndex ? ' active-chunk' : '');
+      span.dataset.index = index;
+      span.textContent = text;
+      pEl.appendChild(span);
+
+      if (i < chunkList.length - 1) {
+        pEl.appendChild(document.createTextNode(' '));
+      }
+    });
+
+    fragment.appendChild(pEl);
+  }
+
   karaokeChunksContainer.appendChild(fragment);
+
+  const total = totalExpectedChunks || currentChunks.length || 1;
+  if (currentChunkBadge) {
+    currentChunkBadge.textContent = `🔊 Frase ${activeChunkIndex + 1} de ${total}`;
+  }
+
+  const activeEl = karaokeChunksContainer.querySelector(`.karaoke-chunk[data-index="${activeChunkIndex}"]`);
+  if (activeEl) {
+    scrollChunkIntoView(activeEl);
+  }
 }
 
 function setActiveKaraokeChunk(index) {
   activeChunkIndex = index;
-  const children = karaokeChunksContainer.children;
-  for (let i = 0; i < children.length; i++) {
-    const el = children[i];
-    if (i === index) {
-      el.classList.add('active-chunk');
-      scrollChunkIntoView(el);
+  const chunkSpans = karaokeChunksContainer.querySelectorAll('.karaoke-chunk');
+
+  let activeEl = null;
+  chunkSpans.forEach(span => {
+    const idx = parseInt(span.dataset.index, 10);
+    if (idx === index) {
+      span.classList.add('active-chunk');
+      activeEl = span;
     } else {
-      el.classList.remove('active-chunk');
+      span.classList.remove('active-chunk');
     }
+  });
+
+  if (activeEl) {
+    scrollChunkIntoView(activeEl);
   }
 
   const total = totalExpectedChunks || currentChunks.length || 1;
-  currentChunkBadge.textContent = `🔊 Frase ${index + 1} de ${total}`;
+  if (currentChunkBadge) {
+    currentChunkBadge.textContent = `🔊 Frase ${index + 1} de ${total}`;
+  }
 }
 
 function scrollChunkIntoView(el) {
   if (!el || !karaokeDisplay) return;
+
   const containerRect = karaokeDisplay.getBoundingClientRect();
   const elRect = el.getBoundingClientRect();
-  const relativeTop = elRect.top - containerRect.top + karaokeDisplay.scrollTop;
-  const targetScrollTop = relativeTop - (karaokeDisplay.clientHeight / 2) + (elRect.height / 2);
-  karaokeDisplay.scrollTo({ top: Math.max(0, targetScrollTop), behavior: 'smooth' });
+  const pEl = el.closest('.karaoke-paragraph') || el;
+  const pRect = pEl.getBoundingClientRect();
+
+  const topComfortMargin = 35;
+  const bottomComfortMargin = 45;
+
+  const isChunkComfortablyVisible = (
+    elRect.top >= containerRect.top + topComfortMargin &&
+    elRect.bottom <= containerRect.bottom - bottomComfortMargin
+  );
+
+  if (isChunkComfortablyVisible) {
+    return;
+  }
+
+  const fitsEntireParagraph = (pRect.height <= containerRect.clientHeight * 0.75);
+  const targetRect = fitsEntireParagraph ? pRect : elRect;
+
+  const relativeTop = targetRect.top - containerRect.top + karaokeDisplay.scrollTop;
+  const targetScrollTop = Math.max(0, relativeTop - 30);
+
+  karaokeDisplay.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
 }
 
 async function pausePlayback() {
