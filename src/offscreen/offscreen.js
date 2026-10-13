@@ -45,6 +45,11 @@ let totalExpectedChunks = 0;
 let convertedChunks = 0;
 let currentChunkTexts = [];
 let currentSmartChunks = [];
+let currentSourceText = '';
+let currentTitle = '';
+let pcmChunkCache = new Map();
+const MAX_PCM_CACHE_CHUNKS = 24;
+let nextGeneratorChunkIndex = 0;
 let currentActiveChunkIndex = -1;
 let scheduledChunks = [];
 let playbackMonitorInterval = null;
@@ -60,6 +65,11 @@ let playbackMonitorInterval = null;
       totalExpectedChunks = last.totalChunks || 0;
       convertedChunks = last.totalChunks || 0;
       currentChunkTexts = Array.isArray(last.chunks) ? last.chunks : [];
+      if (Array.isArray(last.chunks) && last.chunks.length > 0 && typeof last.chunks[0] === 'object') {
+        currentSmartChunks = last.chunks;
+      }
+      if (last.text) currentSourceText = last.text;
+      if (last.title) currentTitle = last.title;
     }
   } catch (err) {
     console.warn('Error recuperando estado persistente en offscreen:', err);
@@ -180,6 +190,18 @@ async function initKokoroEngine(preferredDevice = 'webgpu') {
   }
 }
 
+function disconnectActiveSources() {
+  for (const src of activeSources) {
+    try {
+      src.onended = null;
+      src.stop(0);
+      src.disconnect();
+      src.buffer = null;
+    } catch {}
+  }
+  activeSources = [];
+}
+
 // 4. Playback Controls
 function stopAudioPlayback(resetConversion = false) {
   abortGeneration = true;
@@ -197,16 +219,7 @@ function stopAudioPlayback(resetConversion = false) {
   currentActiveChunkIndex = -1;
   scheduledChunks = [];
   stopPlaybackMonitor();
-
-  for (const src of activeSources) {
-    try {
-      src.onended = null;
-      src.stop(0);
-      src.disconnect();
-      src.buffer = null;
-    } catch {}
-  }
-  activeSources = [];
+  disconnectActiveSources();
 
   if (resetConversion) {
     isConversionComplete = false;
@@ -214,6 +227,9 @@ function stopAudioPlayback(resetConversion = false) {
     totalExpectedChunks = 0;
     currentSmartChunks = [];
     currentChunkTexts = [];
+    currentSourceText = '';
+    currentTitle = '';
+    pcmChunkCache.clear();
   }
 
   if (audioCtx && audioCtx.state === 'suspended') {
@@ -228,6 +244,75 @@ function stopAudioPlayback(resetConversion = false) {
     isConversionComplete: isConversionComplete,
     conversionProgress: isConversionComplete ? 100 : 0
   }).catch(() => {});
+}
+
+async function seekToChunk(targetIndex, options = {}) {
+  if (currentSmartChunks.length === 0 && !currentSourceText) return false;
+
+  const total = currentSmartChunks.length;
+  const clampedIndex = Math.max(0, Math.min(targetIndex, Math.max(0, total - 1)));
+  const forceResynth = Boolean(options.forceResynthesize);
+
+  // Fast Path: Check if targetIndex..endOfGeneratedWindow is completely in pcmChunkCache
+  if (!forceResynth && total > 0) {
+    const endBound = isGenerationDone ? total : nextGeneratorChunkIndex;
+    if (clampedIndex < endBound && endBound > clampedIndex) {
+      let allCached = true;
+      for (let k = clampedIndex; k < endBound; k++) {
+        if (!pcmChunkCache.has(k)) {
+          allCached = false;
+          break;
+        }
+      }
+
+      if (allCached) {
+        const ctx = getAudioContext();
+        if (ctx.state === 'suspended') {
+          await ctx.resume().catch(() => {});
+        }
+        disconnectActiveSources();
+        scheduledChunks = [];
+        pendingAudioQueue = [];
+        for (let k = clampedIndex; k < endBound; k++) {
+          pendingAudioQueue.push(pcmChunkCache.get(k));
+        }
+        nextStartTime = ctx.currentTime + 0.03;
+        currentActiveChunkIndex = -1;
+        isPlaying = true;
+        isPaused = false;
+        completedChunks = clampedIndex;
+        totalScheduledChunks = endBound;
+
+        schedulePendingAudioChunks();
+
+        chrome.runtime.sendMessage({
+          type: MESSAGE_TYPES.PLAYBACK_STATE,
+          isPlaying: true,
+          isPaused: false,
+          chunkIndex: clampedIndex,
+          isConversionComplete: isConversionComplete,
+          totalExpectedChunks: totalExpectedChunks,
+          convertedChunks: convertedChunks,
+          conversionProgress: isConversionComplete ? 100 : Math.round((convertedChunks / (totalExpectedChunks || 1)) * 100)
+        }).catch(() => {});
+        return true;
+      }
+    }
+  }
+
+  // Resynthesis Path: Restart neural stream directly at clampedIndex
+  const sourceText = currentSourceText || currentSmartChunks.map(c => typeof c === 'string' ? c : c.text).join('\n\n');
+  await playText(sourceText, {
+    voice: options.voice || currentVoice,
+    speed: options.speed || currentSpeed,
+    volume: currentVolume,
+    title: currentTitle,
+    startChunkIndex: clampedIndex,
+    reuseSmartChunks: currentSmartChunks.length > 0,
+    clearCache: forceResynth,
+    preserveConversionComplete: isConversionComplete && !forceResynth
+  });
+  return true;
 }
 
 async function playText(text, options = {}) {
@@ -254,11 +339,32 @@ async function playText(text, options = {}) {
     }
   }
 
+  const startChunkIndex = Math.max(0, options.startChunkIndex || 0);
+  const preserveConversion = Boolean(options.preserveConversionComplete && isConversionComplete);
+  const savedConversionComplete = preserveConversion;
+
+  // Pre-split text using smart sentence- and paragraph-aware chunking (or reuse on seek)
+  const smartChunks = (options.reuseSmartChunks && currentSmartChunks.length > 0)
+    ? currentSmartChunks
+    : splitTextIntoSmartChunks(text, {
+        firstChunkTarget: 200,
+        normalChunkTarget: 350,
+        maxChunkLimit: 450
+      });
+
   stopAudioPlayback();
   abortGeneration = false;
   isGenerationDone = false;
-  isConversionComplete = false;
+  isConversionComplete = savedConversionComplete;
   const sessionId = ++activeSessionId;
+
+  currentSourceText = text || currentSourceText;
+  if (options.title !== undefined) currentTitle = options.title;
+  const voiceChanged = options.voice && options.voice !== currentVoice;
+  const speedChanged = options.speed && options.speed !== currentSpeed;
+  if (startChunkIndex === 0 || options.clearCache || voiceChanged || speedChanged) {
+    pcmChunkCache.clear();
+  }
 
   currentVoice = options.voice || currentVoice;
   currentSpeed = options.speed || currentSpeed;
@@ -275,36 +381,39 @@ async function playText(text, options = {}) {
   isPlaying = true;
   isPaused = false;
   pendingAudioQueue = [];
-  progressiveMp3Encoder = new ProgressiveMp3Encoder(24000, 64);
+  // Only overwrite full MP3 when starting from beginning or when not preserving a completed conversion
+  progressiveMp3Encoder = (!savedConversionComplete && startChunkIndex === 0)
+    ? new ProgressiveMp3Encoder(24000, 64)
+    : null;
   currentChunkTexts = [];
   currentActiveChunkIndex = -1;
   scheduledChunks = [];
   nextStartTime = ctx.currentTime + 0.05;
-  totalScheduledChunks = 0;
-  completedChunks = 0;
-  convertedChunks = 0;
-
-  // Pre-split text using smart sentence- and paragraph-aware chunking
-  const smartChunks = splitTextIntoSmartChunks(text, {
-    firstChunkTarget: 200,
-    normalChunkTarget: 350,
-    maxChunkLimit: 450
-  });
+  totalScheduledChunks = startChunkIndex;
+  completedChunks = startChunkIndex;
+  convertedChunks = savedConversionComplete ? smartChunks.length : startChunkIndex;
+  nextGeneratorChunkIndex = startChunkIndex;
   currentSmartChunks = smartChunks;
 
-  const splitter = new SmartTextSplitter(smartChunks);
+  const chunksToSynthesize = smartChunks.slice(startChunkIndex);
+  const splitter = new SmartTextSplitter(chunksToSynthesize);
   activeSplitter = splitter;
   totalExpectedChunks = smartChunks.length;
+
+  const initialPct = savedConversionComplete
+    ? 100
+    : (totalExpectedChunks > 0 ? Math.round((startChunkIndex / totalExpectedChunks) * 100) : 0);
 
   chrome.runtime.sendMessage({
     type: MESSAGE_TYPES.PLAYBACK_STATE,
     isPlaying: true,
     isPaused: false,
-    conversionProgress: 0,
-    convertedChunks: 0,
+    chunkIndex: startChunkIndex,
+    conversionProgress: initialPct,
+    convertedChunks: convertedChunks,
     totalExpectedChunks: totalExpectedChunks,
     chunks: currentSmartChunks,
-    isConversionComplete: false
+    isConversionComplete: isConversionComplete
   }).catch(() => {});
 
   let myGenerationPromise = null;
@@ -312,7 +421,7 @@ async function playText(text, options = {}) {
     try {
       const model = await initKokoroEngine(options.device || currentDevice);
 
-      let chunkIndex = 0;
+      let localIndex = 0;
       const chunkTexts = [];
 
       // Stream chunks continuously with KokoroTTS using the pre-split stream
@@ -323,6 +432,10 @@ async function playText(text, options = {}) {
         if (!rawPcm || rawPcm.length === 0) {
           continue;
         }
+
+        const globalChunkIndex = startChunkIndex + localIndex;
+        localIndex++;
+        nextGeneratorChunkIndex = globalChunkIndex + 1;
 
         // Trim excessive silence padding from neural vocoder output for seamless streaming
         const cleanPcm = trimAudioSilence(rawPcm, chunk.audio.sampling_rate || 24000, 20, 40);
@@ -340,10 +453,14 @@ async function playText(text, options = {}) {
         currentChunkTexts = chunkTexts;
 
         totalScheduledChunks++;
-        convertedChunks++;
-        const conversionPct = totalExpectedChunks > 0 
-          ? Math.min(100, Math.round((convertedChunks / totalExpectedChunks) * 100)) 
-          : 100;
+        if (!savedConversionComplete) {
+          convertedChunks = globalChunkIndex + 1;
+        }
+        const conversionPct = savedConversionComplete
+          ? 100
+          : (totalExpectedChunks > 0
+              ? Math.min(100, Math.round((convertedChunks / totalExpectedChunks) * 100))
+              : 100);
 
         // Update side panel with streaming audio and live conversion progress.
         // Only send full chunks array on the first chunk to avoid serializing large arrays on every step.
@@ -352,23 +469,32 @@ async function playText(text, options = {}) {
           isPlaying: isPlaying,
           isPaused: isPaused,
           totalChunks: totalScheduledChunks,
-          ...(convertedChunks === 1 ? { chunks: currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts } : {}),
+          ...(localIndex === 1 ? { chunks: currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts } : {}),
           conversionProgress: conversionPct,
           convertedChunks: convertedChunks,
           totalExpectedChunks: totalExpectedChunks,
-          isConversionComplete: false
+          isConversionComplete: isConversionComplete
         }).catch(() => {});
 
-        const isParagraphEnd = splitter.chunkMetadata[chunkIndex]?.isParagraphEnd ?? false;
+        const isParagraphEnd = splitter.chunkMetadata[localIndex - 1]?.isParagraphEnd ?? false;
 
-        // Enqueue chunk in pendingAudioQueue for just-in-time Web Audio allocation
-        pendingAudioQueue.push({
+        const queueItem = {
           pcm: cleanPcm,
-          chunkIndex: chunkIndex++,
+          chunkIndex: globalChunkIndex,
           text: chunk.text,
           isParagraphEnd,
           sampleRate: chunk.audio.sampling_rate || 24000
-        });
+        };
+
+        // Store in bounded sliding PCM cache for 0ms Prev/Next seeking
+        pcmChunkCache.set(globalChunkIndex, queueItem);
+        if (pcmChunkCache.size > MAX_PCM_CACHE_CHUNKS) {
+          const oldestKey = pcmChunkCache.keys().next().value;
+          pcmChunkCache.delete(oldestKey);
+        }
+
+        // Enqueue chunk in pendingAudioQueue for just-in-time Web Audio allocation
+        pendingAudioQueue.push(queueItem);
 
         // Schedule into Web Audio API if lookahead buffer needs filling
         schedulePendingAudioChunks();
@@ -381,7 +507,9 @@ async function playText(text, options = {}) {
 
       if (!abortGeneration && activeSessionId === sessionId) {
         isGenerationDone = true;
-        isConversionComplete = true;
+        if (startChunkIndex === 0 || savedConversionComplete) {
+          isConversionComplete = true;
+        }
 
         // Finalize MP3 and store into IndexedDB immediately (instant download ready)
         let mp3Blob = null;
@@ -398,12 +526,12 @@ async function playText(text, options = {}) {
           const finalChunks = currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts;
           const metadata = {
             format: 'mp3',
-            totalChunks: totalScheduledChunks,
+            totalChunks: totalExpectedChunks,
             duration: duration,
             size: mp3Blob.size,
             updatedAt: Date.now(),
-            title: options.title || '',
-            text: text,
+            title: currentTitle || options.title || '',
+            text: currentSourceText,
             chunks: finalChunks,
             voice: currentVoice,
             speed: currentSpeed
@@ -418,7 +546,7 @@ async function playText(text, options = {}) {
 
           // Save lightweight persistent metadata in chrome.storage.local for instantaneous recovery.
           // For very large books (>50k chars), omit duplicating full text/chunks here since IndexedDB already holds them.
-          const isCompactText = text.length <= 50000;
+          const isCompactText = currentSourceText.length <= 50000;
           try {
             await chrome.storage.local.set({
               kokoro_last_conversion: {
@@ -428,8 +556,8 @@ async function playText(text, options = {}) {
                 size: mp3Blob.size,
                 duration: duration,
                 title: metadata.title,
-                ...(isCompactText ? { text: text, chunks: finalChunks } : {}),
-                totalChunks: totalScheduledChunks,
+                ...(isCompactText ? { text: currentSourceText, chunks: finalChunks } : {}),
+                totalChunks: totalExpectedChunks,
                 voice: currentVoice,
                 speed: currentSpeed,
                 timestamp: metadata.updatedAt
@@ -444,12 +572,12 @@ async function playText(text, options = {}) {
           type: MESSAGE_TYPES.PLAYBACK_STATE,
           isPlaying: isPlaying,
           isPaused: isPaused,
-          totalChunks: totalScheduledChunks,
+          totalChunks: totalExpectedChunks,
           chunks: currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts,
-          conversionProgress: 100,
-          convertedChunks: totalScheduledChunks,
-          totalExpectedChunks: totalScheduledChunks,
-          isConversionComplete: true
+          conversionProgress: isConversionComplete ? 100 : Math.round((convertedChunks / (totalExpectedChunks || 1)) * 100),
+          convertedChunks: isConversionComplete ? totalExpectedChunks : convertedChunks,
+          totalExpectedChunks: totalExpectedChunks,
+          isConversionComplete: isConversionComplete
         }).catch(() => {});
       }
 
@@ -461,7 +589,7 @@ async function playText(text, options = {}) {
           isPlaying: false,
           isPaused: false,
           finished: true,
-          isConversionComplete: true
+          isConversionComplete: isConversionComplete
         }).catch(() => {});
       }
     } catch (err) {
@@ -625,11 +753,11 @@ function scheduleChunkPlayback(audioBuffer, chunkIndex, text, isParagraphEnd = f
   });
 
   // Highlight initial chunk immediately if playback is just starting
-  if (chunkIndex === 0 && currentActiveChunkIndex === -1) {
-    currentActiveChunkIndex = 0;
+  if (currentActiveChunkIndex === -1) {
+    currentActiveChunkIndex = chunkIndex;
     chrome.runtime.sendMessage({
       type: MESSAGE_TYPES.CURRENT_CHUNK_INDEX,
-      chunkIndex: 0,
+      chunkIndex: chunkIndex,
       text: text,
       duration: duration
     }).catch(() => {});
@@ -673,6 +801,7 @@ const OFFSCREEN_HANDLED_TYPES = new Set([
   MESSAGE_TYPES.PAUSE_PLAYBACK,
   MESSAGE_TYPES.RESUME_PLAYBACK,
   MESSAGE_TYPES.STOP_PLAYBACK,
+  MESSAGE_TYPES.SEEK_PLAYBACK,
   MESSAGE_TYPES.SET_VOLUME,
   MESSAGE_TYPES.SET_SPEED,
   "DOWNLOAD_MP3",
@@ -744,11 +873,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           speed: message.speed,
           volume: message.volume,
           device: message.device,
-          title: message.title
+          title: message.title,
+          startChunkIndex: message.startChunkIndex || 0
         }).catch((err) => {
           console.error('[Kokoro Engine] playText error:', err);
         });
         sendResponse({ success: true, started: true });
+        break;
+      }
+
+      case MESSAGE_TYPES.SEEK_PLAYBACK: {
+        seekToChunk(message.chunkIndex, {
+          voice: message.voice,
+          speed: message.speed,
+          forceResynthesize: Boolean(message.forceResynthesize)
+        }).catch((err) => {
+          console.error('[Kokoro Engine] seekToChunk error:', err);
+        });
+        sendResponse({ success: true });
         break;
       }
 
@@ -803,9 +945,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case MESSAGE_TYPES.SET_SPEED: {
-        currentSpeed = message.speed;
-        for (const s of activeSources) {
-          try { s.playbackRate.value = currentSpeed; } catch {}
+        const newSpeed = Number(message.speed) || 1.0;
+        const speedChanged = Math.abs(newSpeed - currentSpeed) > 0.001;
+        currentSpeed = newSpeed;
+        if (isPlaying && speedChanged) {
+          seekToChunk(Math.max(0, currentActiveChunkIndex), {
+            speed: currentSpeed,
+            forceResynthesize: true
+          }).catch((err) => {
+            console.error('[Kokoro Engine] speed change resynthesis error:', err);
+          });
         }
         sendResponse({ success: true });
         break;

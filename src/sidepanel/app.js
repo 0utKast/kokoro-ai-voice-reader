@@ -476,7 +476,7 @@ function setActiveKaraokeChunk(index) {
 }
 
 // 3. User Actions
-async function startPlayback() {
+async function startPlayback(startChunkIndex = 0) {
   const rawText = textInput.value.trim();
   if (!rawText) {
     textInput.focus();
@@ -488,7 +488,6 @@ async function startPlayback() {
 
   isConversionComplete = false;
   totalExpectedChunks = 0;
-  activeChunkIndex = 0;
 
   // Pre-split text and render full structured paragraphs immediately
   const preChunks = splitTextIntoSmartChunks(text, {
@@ -499,8 +498,10 @@ async function startPlayback() {
 
   currentChunks = preChunks;
   totalExpectedChunks = preChunks.length;
+  const initialIndex = Math.max(0, Math.min(startChunkIndex, Math.max(0, preChunks.length - 1)));
+  activeChunkIndex = initialIndex;
   renderKaraokeChunks(preChunks);
-  setActiveKaraokeChunk(0);
+  setActiveKaraokeChunk(initialIndex);
 
   btnDownloadAudio.disabled = true;
   btnDownloadAudio.classList.remove('btn-download-ready');
@@ -526,7 +527,8 @@ async function startPlayback() {
       voice: voice,
       speed: speed,
       volume: 1.0,
-      title: currentDocumentTitle || 'audio_kokoro'
+      title: currentDocumentTitle || 'audio_kokoro',
+      startChunkIndex: initialIndex
     });
 
     updatePlayPauseUI(true, false);
@@ -534,6 +536,21 @@ async function startPlayback() {
     console.error('Error starting playback:', err);
     modelStatusText.textContent = `Error: ${err.message}`;
     modelProgressCard.classList.remove('hidden');
+  }
+}
+
+async function seekPlaybackToChunk(index, options = {}) {
+  const total = totalExpectedChunks || currentChunks.length || 0;
+  if (index < 0 || (total > 0 && index >= total)) return;
+  setActiveKaraokeChunk(index);
+
+  if (isPlaying) {
+    updatePlayPauseUI(true, false);
+    await chrome.runtime.sendMessage({
+      type: MESSAGE_TYPES.SEEK_PLAYBACK,
+      chunkIndex: index,
+      ...options
+    }).catch(() => {});
   }
 }
 
@@ -598,7 +615,7 @@ function setupEventListeners() {
     isTogglingPlayback = true;
     try {
       if (!isPlaying) {
-        await startPlayback();
+        await startPlayback(activeChunkIndex > 0 ? activeChunkIndex : 0);
       } else if (isPlaying && !isPaused) {
         await pausePlayback();
       } else {
@@ -618,7 +635,7 @@ function setupEventListeners() {
   if (btnPrevChunk) {
     btnPrevChunk.addEventListener('click', () => {
       if (activeChunkIndex > 0) {
-        setActiveKaraokeChunk(activeChunkIndex - 1);
+        seekPlaybackToChunk(activeChunkIndex - 1);
       }
     });
   }
@@ -628,7 +645,7 @@ function setupEventListeners() {
     btnNextChunk.addEventListener('click', () => {
       const total = totalExpectedChunks || currentChunks.length || 0;
       if (activeChunkIndex < total - 1) {
-        setActiveKaraokeChunk(activeChunkIndex + 1);
+        seekPlaybackToChunk(activeChunkIndex + 1);
       }
     });
   }
@@ -640,7 +657,7 @@ function setupEventListeners() {
       if (!chunkSpan || chunkSpan.dataset.index === undefined) return;
       const idx = parseInt(chunkSpan.dataset.index, 10);
       if (!isNaN(idx) && idx >= 0 && idx < currentChunks.length) {
-        setActiveKaraokeChunk(idx);
+        seekPlaybackToChunk(idx);
       }
     });
   }
@@ -666,17 +683,28 @@ function setupEventListeners() {
 
   // Voice selector
   voiceSelect.addEventListener('change', async (e) => {
-    await saveSettings({ selectedVoice: e.target.value });
+    const newVoice = e.target.value;
+    await saveSettings({ selectedVoice: newVoice });
+    if (isPlaying) {
+      await seekPlaybackToChunk(Math.max(0, activeChunkIndex), {
+        voice: newVoice,
+        forceResynthesize: true
+      });
+    }
   });
 
   // Speed slider
-  speedSlider.addEventListener('input', async (e) => {
+  let speedDebounceTimer = null;
+  speedSlider.addEventListener('input', (e) => {
     const val = parseFloat(e.target.value);
     speedValue.textContent = `${val.toFixed(2)}x`;
-    await saveSettings({ speed: val });
-    if (isPlaying) {
-      await chrome.runtime.sendMessage({ type: MESSAGE_TYPES.SET_SPEED, speed: val });
-    }
+    if (speedDebounceTimer) clearTimeout(speedDebounceTimer);
+    speedDebounceTimer = setTimeout(async () => {
+      await saveSettings({ speed: val });
+      if (isPlaying) {
+        await chrome.runtime.sendMessage({ type: MESSAGE_TYPES.SET_SPEED, speed: val }).catch(() => {});
+      }
+    }, 180);
   });
 
   // Floating selection pill toggle

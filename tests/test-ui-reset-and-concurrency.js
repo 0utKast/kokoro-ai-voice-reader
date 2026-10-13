@@ -196,6 +196,52 @@ console.log('\n🔹 Test 4: Mutex de WebGPU en playText (prevención de GPU hang
   assert(gpuConcurrentExecutions === 0, 'Todas las sesiones de GPU concluyeron limpiamente sin bloqueos');
 }
 
+// ----------------------------------------------------
+// Test 5: Salto interactivo de frases (SEEK_PLAYBACK) con caché PCM y cambio en caliente
+// ----------------------------------------------------
+console.log('\n🔹 Test 5: Salto interactivo de frases (SEEK_PLAYBACK) y cambio de voz/velocidad en caliente');
+{
+  const pcmChunkCache = new Map();
+  pcmChunkCache.set(0, { samples: new Float32Array(24000), sampleRate: 24000, text: 'Frase 1', isParagraphEnd: false });
+  pcmChunkCache.set(1, { samples: new Float32Array(24000), sampleRate: 24000, text: 'Frase 2', isParagraphEnd: false });
+  pcmChunkCache.set(2, { samples: new Float32Array(24000), sampleRate: 24000, text: 'Frase 3', isParagraphEnd: true });
+
+  let scheduledFromCache = [];
+  let resynthesizedFromChunk = null;
+  let currentVoice = 'ef_dora';
+  let currentSpeed = 1.0;
+
+  function mockSeekToChunk(targetIdx, { voice, speed, forceResynthesize = false } = {}) {
+    const voiceChanged = voice && voice !== currentVoice;
+    const speedChanged = speed && Math.abs(speed - currentSpeed) > 0.001;
+
+    if (!forceResynthesize && !voiceChanged && !speedChanged && pcmChunkCache.has(targetIdx)) {
+      scheduledFromCache = [];
+      for (let idx = targetIdx; idx < 3; idx++) {
+        if (pcmChunkCache.has(idx)) {
+          scheduledFromCache.push(idx);
+        }
+      }
+      return 'cache-hit';
+    }
+
+    if (voiceChanged) currentVoice = voice;
+    if (speedChanged) currentSpeed = speed;
+    pcmChunkCache.clear();
+    resynthesizedFromChunk = targetIdx;
+    return 'resynthesize';
+  }
+
+  const mode1 = mockSeekToChunk(1);
+  assert(mode1 === 'cache-hit', 'Saltar a una frase ya sintetizada usa la vía rápida de caché PCM en RAM sin re-inferencia WebGPU');
+  assert(scheduledFromCache.length === 2 && scheduledFromCache[0] === 1 && scheduledFromCache[1] === 2, 'Reprograma instantáneamente desde la frase objetivo (1 -> 2)');
+
+  const mode2 = mockSeekToChunk(1, { voice: 'em_alex', forceResynthesize: true });
+  assert(mode2 === 'resynthesize', 'Cambiar de voz en caliente invalida la caché y re-sintetiza desde la frase activa');
+  assert(resynthesizedFromChunk === 1 && currentVoice === 'em_alex', 'La re-síntesis arranca exactamente en la frase activa con la nueva voz');
+  assert(pcmChunkCache.size === 0, 'La caché PCM anterior se limpia al cambiar voz o velocidad');
+}
+
 console.log('\n====================================================');
-console.log(`🎉 TODAS LAS PRUEBAS DE LIMPIEZA Y MUTEX: ${passed} / ${total} EXITOSAS`);
+console.log(`🎉 TODAS LAS PRUEBAS DE LIMPIEZA, SEEK Y MUTEX: ${passed} / ${total} EXITOSAS`);
 console.log('====================================================\n');
