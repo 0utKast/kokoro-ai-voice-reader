@@ -31,12 +31,61 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
-// 1. Create and manage the floating quick-action pill
+let floatingPillShadow = null;
+
+// 1. Create and manage the floating quick-action pill (isolated via Shadow DOM)
 function ensurePillElement() {
   if (!floatingPillHost) {
     floatingPillHost = document.createElement('div');
     floatingPillHost.id = 'kokoro-floating-pill-host';
-    floatingPillHost.style.display = 'none';
+    floatingPillHost.style.cssText = 'position: absolute; z-index: 2147483647; pointer-events: auto; user-select: none; display: none;';
+
+    floatingPillShadow = floatingPillHost.attachShadow({ mode: 'open' });
+
+    const style = document.createElement('style');
+    style.textContent = `
+      .kokoro-selection-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: #0f172a;
+        color: #f8fafc;
+        padding: 6px 12px;
+        border-radius: 20px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 1.2;
+        box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(99, 102, 241, 0.4);
+        cursor: pointer;
+        transform: translateY(-8px);
+        opacity: 0;
+        transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+      }
+      .kokoro-selection-pill.visible {
+        transform: translateY(0);
+        opacity: 1;
+      }
+      .kokoro-selection-pill:hover {
+        background: #1e1b4b;
+        box-shadow: 0 6px 22px rgba(99, 102, 241, 0.5), 0 0 0 1px #6366f1;
+        transform: scale(1.04);
+      }
+      .kokoro-pill-icon {
+        display: flex;
+        align-items: center;
+        color: #38bdf8;
+      }
+      .kokoro-pill-label {
+        letter-spacing: 0.2px;
+      }
+      .kokoro-selection-pill.loading {
+        background: #312e81;
+        box-shadow: 0 4px 18px rgba(99, 102, 241, 0.4);
+        pointer-events: none;
+        opacity: 0.92;
+      }
+    `;
 
     const pill = document.createElement('div');
     pill.className = 'kokoro-selection-pill';
@@ -81,33 +130,46 @@ function ensurePillElement() {
       }, 500);
     });
 
-    floatingPillHost.appendChild(pill);
+    floatingPillShadow.appendChild(style);
+    floatingPillShadow.appendChild(pill);
     document.body.appendChild(floatingPillHost);
   }
   return floatingPillHost;
 }
 
+function getPillElement() {
+  return floatingPillShadow ? floatingPillShadow.querySelector('.kokoro-selection-pill') : null;
+}
+
 function showPill(x, y) {
   const host = ensurePillElement();
-  const pill = host.querySelector('.kokoro-selection-pill');
+  const pill = getPillElement();
 
   host.style.left = `${Math.max(10, x)}px`;
   host.style.top = `${Math.max(10, y)}px`;
   host.style.display = 'block';
 
   requestAnimationFrame(() => {
-    pill.classList.add('visible');
+    if (pill) pill.classList.add('visible');
   });
 }
 
 function hidePill() {
   if (floatingPillHost && floatingPillHost.style.display !== 'none') {
-    const pill = floatingPillHost.querySelector('.kokoro-selection-pill');
+    const pill = getPillElement();
     if (pill) pill.classList.remove('visible');
     setTimeout(() => {
       if (floatingPillHost) floatingPillHost.style.display = 'none';
     }, 180);
   }
+}
+
+function isEventInsidePill(e) {
+  if (!floatingPillHost) return false;
+  if (typeof e.composedPath === 'function') {
+    return e.composedPath().includes(floatingPillHost);
+  }
+  return floatingPillHost.contains(e.target);
 }
 
 // 2. Event Listeners for Selection Detection
@@ -119,7 +181,7 @@ document.addEventListener('mouseup', (e) => {
   }
 
   // If clicking on our own pill, ignore
-  if (floatingPillHost && floatingPillHost.contains(e.target)) return;
+  if (isEventInsidePill(e)) return;
 
   // Don't show pill inside form inputs, textareas or editable areas
   const isEditable = e.target && (
@@ -166,7 +228,7 @@ document.addEventListener('mouseup', (e) => {
 });
 
 document.addEventListener('mousedown', (e) => {
-  if (floatingPillHost && !floatingPillHost.contains(e.target)) {
+  if (floatingPillHost && !isEventInsidePill(e)) {
     hidePill();
   }
 });

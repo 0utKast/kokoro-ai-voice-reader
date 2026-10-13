@@ -8,6 +8,19 @@ import { getSettings, setSessionState } from '../shared/storage.js';
 
 const OFFSCREEN_PATH = 'src/offscreen/offscreen.html';
 
+// Cache autoOpenSidePanel setting so chrome.sidePanel.open() can be called synchronously
+// within the active user gesture (before any async await expires the gesture token).
+let cachedAutoOpenSidePanel = true;
+getSettings().then((s) => {
+  cachedAutoOpenSidePanel = s.autoOpenSidePanel !== false;
+}).catch(() => {});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === 'local' && changes.kokoro_settings?.newValue) {
+    cachedAutoOpenSidePanel = changes.kokoro_settings.newValue.autoOpenSidePanel !== false;
+  }
+});
+
 // 1. Extension Lifecycle: Setup Context Menus and Side Panel Behavior
 chrome.runtime.onInstalled.addListener(async () => {
   // Set Side Panel behavior: Opens automatically when clicking the extension action icon
@@ -78,26 +91,28 @@ async function playSelectedText(rawText, tabId = null) {
   const text = rawText ? rawText.trim() : '';
   if (!text) return;
 
-  await ensureOffscreenDocument();
-  await waitForOffscreenReady();
-  const settings = await getSettings();
+  // CRITICAL MV3 RULE: Call sidePanel.open() synchronously BEFORE any await
+  // so that the user gesture token from context menu / shortcut / pill click is preserved.
+  const openPanelPromise = (cachedAutoOpenSidePanel && chrome.sidePanel && tabId)
+    ? chrome.sidePanel.open({ tabId }).catch((err) => {
+        console.warn('Could not auto-open side panel:', err);
+      })
+    : Promise.resolve();
 
-  // Open side panel if enabled and tabId is present
-  if (settings.autoOpenSidePanel !== false && chrome.sidePanel && tabId) {
-    try {
-      await chrome.sidePanel.open({ tabId });
-    } catch (err) {
-      console.warn('Could not auto-open side panel:', err);
-    }
-  }
+  const [, , settings] = await Promise.all([
+    openPanelPromise,
+    ensureOffscreenDocument(),
+    getSettings()
+  ]);
+
+  await setSessionState({ isPlaying: true, isPaused: false, text: text });
+  await waitForOffscreenReady();
 
   // Send text to side panel input if open
   chrome.runtime.sendMessage({
     type: 'SELECTION_TEXT_LOADED',
     text: text
   }).catch(() => {});
-
-  await setSessionState({ isPlaying: true, isPaused: false, text: text });
 
   // Dispatch to offscreen engine with configured voice and speed
   await chrome.runtime.sendMessage({
@@ -145,6 +160,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  const isFromContentScript = Boolean(sender?.tab?.id && message.origin !== 'sidepanel');
+  const shouldRespond = (
+    message.type === 'ENSURE_OFFSCREEN' ||
+    message.type === 'PLAY_SELECTION' ||
+    (message.type === MESSAGE_TYPES.PLAY_TEXT && isFromContentScript)
+  );
+
   (async () => {
     try {
       switch (message.type) {
@@ -162,37 +184,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         case MESSAGE_TYPES.PLAY_TEXT: {
-          // If sent from a content script, route through playSelectedText to ensure offscreen and load settings
-          if (sender?.tab?.id && message.origin !== 'sidepanel') {
+          if (isFromContentScript) {
             await playSelectedText(message.text, sender.tab.id);
             sendResponse({ success: true, handledByServiceWorker: true });
             break;
           }
-          await ensureOffscreenDocument();
+          // Passively track session state; offscreen document handles PLAY_TEXT response
           await setSessionState({ isPlaying: true, isPaused: false, text: message.text });
-          sendResponse({ success: true, handledByServiceWorker: true });
           break;
         }
 
         case MESSAGE_TYPES.STOP_PLAYBACK: {
+          // Passively track session state; offscreen document handles STOP_PLAYBACK response
           await setSessionState({ isPlaying: false, isPaused: false });
-          sendResponse({ success: true });
           break;
         }
 
         default:
-          // Do not sendResponse here to avoid conflict with offscreen handler
           break;
       }
     } catch (err) {
       console.error('Service worker error:', err);
-      sendResponse({ error: err.message });
+      if (shouldRespond) {
+        sendResponse({ error: err.message });
+      }
     }
   })();
 
-  // Return true if we are handling the response asynchronously for our specific messages
-  if (message.type === 'ENSURE_OFFSCREEN' || message.type === 'PLAY_SELECTION' || message.type === MESSAGE_TYPES.PLAY_TEXT) {
-    return true;
-  }
-  return false;
+  return shouldRespond;
 });

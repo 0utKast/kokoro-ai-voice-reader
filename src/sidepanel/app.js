@@ -3,7 +3,7 @@
  */
 
 import { KOKORO_VOICES, MESSAGE_TYPES, DEFAULT_SETTINGS } from '../shared/constants.js';
-import { getSettings, saveSettings } from '../shared/storage.js';
+import { getSettings, saveSettings, getSessionState } from '../shared/storage.js';
 import { extractTextFromPDF } from '../shared/pdf-extractor.js';
 import { normalizeTextForSpeech, splitTextIntoSmartChunks } from '../shared/audio-utils.js';
 import { getAudioBlob, clearAudioBlobs } from '../shared/audio-storage.js';
@@ -92,12 +92,19 @@ function setKaraokeFontSize(size) {
 
 async function syncPlaybackState() {
   try {
-    const state = await chrome.runtime.sendMessage({ type: 'GET_PLAYBACK_STATE' });
+    const [state, session] = await Promise.all([
+      chrome.runtime.sendMessage({ type: 'GET_PLAYBACK_STATE' }),
+      getSessionState()
+    ]);
     if (state?.isPlaying) {
+      if (!textInput.value.trim() && session?.text) {
+        textInput.value = session.text;
+        lastConvertedText = normalizeTextForSpeech(session.text);
+      }
       if (state.chunks && state.chunks.length > 0) {
         renderKaraokeChunks(state.chunks);
       }
-      if (typeof state.chunkIndex === 'number') {
+      if (typeof state.chunkIndex === 'number' && state.chunkIndex >= 0) {
         setActiveKaraokeChunk(state.chunkIndex);
       }
       updatePlayPauseUI(state.isPlaying, state.isPaused);
@@ -131,7 +138,10 @@ async function restoreLastConversion() {
     if (record?.blob && record.blob.size > 0) {
       isConversionComplete = true;
       const sizeMB = (record.blob.size / 1024 / 1024).toFixed(1);
-      const total = last?.totalChunks || record.totalChunks || (last?.chunks ? last.chunks.length : 1);
+      const savedChunks = (last?.chunks && Array.isArray(last.chunks) && last.chunks.length > 0)
+        ? last.chunks
+        : (Array.isArray(record.chunks) ? record.chunks : []);
+      const total = last?.totalChunks || record.totalChunks || (savedChunks.length > 0 ? savedChunks.length : 1);
       totalExpectedChunks = total;
 
       if (last?.title || record.title) {
@@ -147,8 +157,8 @@ async function restoreLastConversion() {
       }
 
       // Restore chunks if available
-      if (last?.chunks && Array.isArray(last.chunks) && last.chunks.length > 0) {
-        currentChunks = last.chunks;
+      if (savedChunks.length > 0) {
+        currentChunks = savedChunks;
       }
 
       // Enable download button in green ready state
@@ -449,20 +459,13 @@ function scrollChunkIntoView(el) {
 
 function setActiveKaraokeChunk(index) {
   activeChunkIndex = index;
-  const chunkSpans = karaokeChunksContainer.querySelectorAll('.karaoke-chunk');
 
-  let activeEl = null;
-  chunkSpans.forEach(span => {
-    const idx = parseInt(span.dataset.index, 10);
-    if (idx === index) {
-      span.classList.add('active-chunk');
-      activeEl = span;
-    } else {
-      span.classList.remove('active-chunk');
-    }
-  });
+  const prevActive = karaokeChunksContainer.querySelectorAll('.karaoke-chunk.active-chunk');
+  prevActive.forEach(span => span.classList.remove('active-chunk'));
 
+  const activeEl = karaokeChunksContainer.querySelector(`.karaoke-chunk[data-index="${index}"]`);
   if (activeEl) {
+    activeEl.classList.add('active-chunk');
     scrollChunkIntoView(activeEl);
   }
 
@@ -738,6 +741,11 @@ function setupEventListeners() {
 
       let text = '';
       try {
+        // Inject Readability on-demand only when extracting an article (avoids loading 92KB on every tab)
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ['src/libs/Readability.js']
+        }).catch(() => {});
         const response = await chrome.tabs.sendMessage(tab.id, { type: MESSAGE_TYPES.EXTRACT_ARTICLE });
         text = response?.text || '';
       } catch {
@@ -776,7 +784,7 @@ function setupEventListeners() {
         textInput.value = normalizeTextForSpeech(text);
         const originalHTML = btnExtractArticle.innerHTML;
         btnExtractArticle.textContent = '✓ Capturado';
-        btnExtractArticle.style.borderColor = 'var(--primary-color)';
+        btnExtractArticle.style.borderColor = 'var(--border-focus)';
         setTimeout(() => {
           btnExtractArticle.innerHTML = originalHTML;
           btnExtractArticle.style.borderColor = '';
@@ -809,7 +817,7 @@ function setupEventListeners() {
   // Drag and drop onto textInput
   textInput.addEventListener('dragover', (e) => {
     e.preventDefault();
-    textInput.style.borderColor = 'var(--primary-color)';
+    textInput.style.borderColor = 'var(--border-focus)';
   });
   textInput.addEventListener('dragleave', () => {
     textInput.style.borderColor = '';
@@ -877,11 +885,17 @@ function setupEventListeners() {
   });
 
   // Reset conversion state when user types or pastes new text so stale badges don't linger
+  let inputResetTimer = null;
   textInput.addEventListener('input', () => {
-    const currentText = normalizeTextForSpeech(textInput.value.trim());
-    if (isConversionComplete && currentText !== lastConvertedText) {
-      resetConversionState({ clearStorage: false });
-    }
+    if (!isConversionComplete) return;
+    if (inputResetTimer) clearTimeout(inputResetTimer);
+    inputResetTimer = setTimeout(() => {
+      if (!isConversionComplete) return;
+      const currentText = normalizeTextForSpeech(textInput.value.trim());
+      if (currentText !== lastConvertedText) {
+        resetConversionState({ clearStorage: false });
+      }
+    }, 100);
   });
 
   // Download MP3

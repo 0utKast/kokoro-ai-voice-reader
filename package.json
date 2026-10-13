@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "icons": "python3 scripts/generate_icons.py",
-    "package": "rm -f dist/kokoro-ai-extension.zip && zip -r dist/kokoro-ai-extension.zip manifest.json icons src -x '*.DS_Store*'",
+    "package": "rm -f dist/kokoro-ai-extension.zip && zip -r dist/kokoro-ai-extension.zip manifest.json icons src -x '*.DS_Store*' 'src/voices/zf_*' 'src/voices/zm_*' 'src/voices/jf_*' 'src/voices/jm_*' 'src/voices/hf_*' 'src/voices/hm_*' 'src/voices/if_*' 'src/voices/im_*' 'src/voices/pf_*' 'src/voices/pm_*' 'src/voices/ff_*'",
     "pwa": "node scripts/pwa-server.js",
     "pwa:dev": "node scripts/pwa-server.js",
     "test": "node tests/test-buffer-management.js && node tests/test-mp3-download.js && node tests/test-persistence.js && node tests/test-karaoke-paragraphs.js && node tests/test-ui-reset-and-concurrency.js"

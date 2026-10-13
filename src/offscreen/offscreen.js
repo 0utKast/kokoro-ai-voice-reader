@@ -345,13 +345,14 @@ async function playText(text, options = {}) {
           ? Math.min(100, Math.round((convertedChunks / totalExpectedChunks) * 100)) 
           : 100;
 
-        // Update side panel with streaming audio and live conversion progress
+        // Update side panel with streaming audio and live conversion progress.
+        // Only send full chunks array on the first chunk to avoid serializing large arrays on every step.
         chrome.runtime.sendMessage({
           type: MESSAGE_TYPES.PLAYBACK_STATE,
           isPlaying: isPlaying,
           isPaused: isPaused,
           totalChunks: totalScheduledChunks,
-          chunks: currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts,
+          ...(convertedChunks === 1 ? { chunks: currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts } : {}),
           conversionProgress: conversionPct,
           convertedChunks: convertedChunks,
           totalExpectedChunks: totalExpectedChunks,
@@ -394,6 +395,7 @@ async function playText(text, options = {}) {
 
         if (mp3Blob && mp3Blob.size > 0) {
           const duration = progressiveMp3Encoder?.durationSeconds || 0;
+          const finalChunks = currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts;
           const metadata = {
             format: 'mp3',
             totalChunks: totalScheduledChunks,
@@ -402,7 +404,7 @@ async function playText(text, options = {}) {
             updatedAt: Date.now(),
             title: options.title || '',
             text: text,
-            chunks: currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts,
+            chunks: finalChunks,
             voice: currentVoice,
             speed: currentSpeed
           };
@@ -414,7 +416,9 @@ async function playText(text, options = {}) {
             console.error('Error guardando audio MP3 en IndexedDB:', storageErr);
           }
 
-          // Save lightweight persistent metadata in chrome.storage.local for instantaneous recovery
+          // Save lightweight persistent metadata in chrome.storage.local for instantaneous recovery.
+          // For very large books (>50k chars), omit duplicating full text/chunks here since IndexedDB already holds them.
+          const isCompactText = text.length <= 50000;
           try {
             await chrome.storage.local.set({
               kokoro_last_conversion: {
@@ -424,8 +428,7 @@ async function playText(text, options = {}) {
                 size: mp3Blob.size,
                 duration: duration,
                 title: metadata.title,
-                text: text,
-                chunks: currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts,
+                ...(isCompactText ? { text: text, chunks: finalChunks } : {}),
                 totalChunks: totalScheduledChunks,
                 voice: currentVoice,
                 speed: currentSpeed,
@@ -522,6 +525,10 @@ function cleanupFinishedSources() {
       completedChunks++;
     }
   }
+  // Prune past scheduledChunks so the array remains bounded to active/upcoming chunks
+  while (scheduledChunks.length > 1 && scheduledChunks[0].endTime + 0.5 <= now) {
+    scheduledChunks.shift();
+  }
 }
 
 function schedulePendingAudioChunks() {
@@ -566,8 +573,7 @@ function startPlaybackMonitor() {
       schedulePendingAudioChunks();
     }
 
-    const startIndex = Math.max(0, currentActiveChunkIndex);
-    for (let i = startIndex; i < scheduledChunks.length; i++) {
+    for (let i = 0; i < scheduledChunks.length; i++) {
       const chunk = scheduledChunks[i];
       if (t >= chunk.startTime && t < chunk.endTime) {
         if (currentActiveChunkIndex !== chunk.chunkIndex) {
@@ -658,8 +664,32 @@ function scheduleChunkPlayback(audioBuffer, chunkIndex, text, isParagraphEnd = f
   };
 }
 
+const OFFSCREEN_HANDLED_TYPES = new Set([
+  "GET_PLAYBACK_STATE",
+  MESSAGE_TYPES.CHECK_ENGINE,
+  MESSAGE_TYPES.LOAD_MODEL,
+  "RESET_STATE",
+  MESSAGE_TYPES.PLAY_TEXT,
+  MESSAGE_TYPES.PAUSE_PLAYBACK,
+  MESSAGE_TYPES.RESUME_PLAYBACK,
+  MESSAGE_TYPES.STOP_PLAYBACK,
+  MESSAGE_TYPES.SET_VOLUME,
+  MESSAGE_TYPES.SET_SPEED,
+  "DOWNLOAD_MP3",
+  "DOWNLOAD_AUDIO",
+  "DOWNLOAD_WAV"
+]);
+
 // 5. Message Listener
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message?.type || !OFFSCREEN_HANDLED_TYPES.has(message.type)) {
+    return false;
+  }
+  // Ignore PLAY_TEXT originating from content script (Service Worker orchestrates it first)
+  if (message.type === MESSAGE_TYPES.PLAY_TEXT && sender?.tab?.id && message.origin !== 'sidepanel') {
+    return false;
+  }
+
   (async () => {
     switch (message.type) {
       case "GET_PLAYBACK_STATE": {

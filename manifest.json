@@ -43,14 +43,14 @@
         "src/libs/*",
         "src/voices/*"
       ],
-      "matches": ["<all_urls>"]
+      "matches": ["<all_urls>"],
+      "use_dynamic_url": true
     }
   ],
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
       "js": [
-        "src/libs/Readability.js",
         "src/content/content.js"
       ],
       "css": ["src/content/content.css"],
