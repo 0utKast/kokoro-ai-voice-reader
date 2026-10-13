@@ -2,7 +2,7 @@
  * Test Suite: Karaoke Paragraph Structuring & Reflow Resilience
  */
 
-import { splitTextIntoSmartChunks, normalizeTextForSpeech } from '../src/shared/audio-utils.js';
+import { splitTextIntoSmartChunks, splitTextIntoSentences, normalizeTextForSpeech } from '../src/shared/audio-utils.js';
 
 let passed = 0;
 let total = 0;
@@ -84,6 +84,15 @@ Párrafo 2 oracion D. Párrafo 2 oracion E.`;
   // Verify full text integrity
   const combinedP0 = paragraphsMap.get(0).map(c => c.text).join(' ');
   assert(combinedP0.includes('oracion A') && combinedP0.includes('oracion C'), 'Párrafo 0 conserva todo su contenido textual íntegro');
+}
+
+// Test 4: Protección de abreviaturas bilingües (ES/EN) e iniciales
+console.log('\n🔹 Test 4: Protección de abreviaturas en español/inglés e iniciales de nombres');
+{
+  const enText = 'Mr. Smith and Mrs. Jones met Dr. J. K. Rowling at St. Pancras Station in the U.S.A. Then they discussed classic literature.';
+  const sentences = splitTextIntoSentences(enText);
+  assert(sentences.length === 2, `El texto en inglés con abreviaturas e iniciales se divide exactamente en 2 oraciones (obtenido: ${sentences.length})`);
+  assert(sentences[0].includes('Mr. Smith') && sentences[0].includes('J. K. Rowling') && sentences[0].includes('St. Pancras'), 'La primera oración preserva Mr., Mrs., Dr., J. K. y St. sin cortes prematuros');
 }
 
 console.log('\n====================================================');

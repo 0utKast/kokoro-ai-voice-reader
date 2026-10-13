@@ -1,10 +1,15 @@
 import { TextSplitterStream } from '../libs/kokoro.web.js';
 
-const SPANISH_ABBREVIATIONS = [
-  'Sr\\.', 'Sra\\.', 'Srta\\.', 'Dr\\.', 'Dra\\.', 'Prof\\.', 'D\\.', 'Dña\\.',
-  'pág\\.', 'págs\\.', 'ej\\.', 'p\\. ej\\.', 'etc\\.', 'núm\\.', 'vol\\.', 'cap\\.', 'art\\.',
-  'EE\\.UU\\.', 'EE\\. UU\\.', 'U\\.S\\.A\\.', 'a\\.C\\.', 'd\\.C\\.', 'Ud\\.', 'Uds\\.', 'Vd\\.', 'Vds\\.',
-  'Gob\\.', 'Gral\\.', 'Av\\.', 'Avda\\.', 'fig\\.', 'figs\\.', 'op\\. cit\\.', 'ibid\\.'
+const PROTECTED_ABBREVIATIONS = [
+  // Español (pre-nominal / mid-sentence abbreviations followed by Capital or Number)
+  'Sr\\.', 'Sra\\.', 'Srta\\.', 'Dr\\.', 'Dra\\.', 'Prof\\.', 'Profa\\.', 'D\\.', 'Dña\\.',
+  'pág\\.', 'págs\\.', 'ej\\.', 'p\\. ej\\.', 'núm\\.', 'vol\\.', 'cap\\.', 'art\\.',
+  'EE\\.(?=\\s+UU\\.)', 'Ud\\.', 'Uds\\.', 'Vd\\.', 'Vds\\.', 'Gob\\.', 'Gral\\.', 'Av\\.', 'Avda\\.',
+  'fig\\.', 'figs\\.', 'op\\. cit\\.', 'ibid\\.',
+  // English (for US/UK Kokoro voices)
+  'Mr\\.', 'Mrs\\.', 'Ms\\.', 'Mx\\.', 'Jr\\.', 'St\\.', 'Mt\\.', 'Rev\\.',
+  'Gen\\.', 'Col\\.', 'Lt\\.', 'Sgt\\.', 'Capt\\.', 'vs\\.', 'v\\.',
+  'e\\.g\\.', 'i\\.e\\.', 'cf\\.', 'et al\\.', 'No\\.'
 ];
 
 /**
@@ -47,7 +52,7 @@ export function normalizeTextForSpeech(text) {
 
 /**
  * Splits prose text into complete, grammatically sound sentences.
- * Protects abbreviations, decimals, and quotation marks so no sentence is cut prematurely.
+ * Protects abbreviations, decimals, initials, and quotation marks so no sentence is cut prematurely.
  */
 export function splitTextIntoSentences(text) {
   if (!text || typeof text !== 'string') return [];
@@ -56,7 +61,7 @@ export function splitTextIntoSentences(text) {
   const abbrevMap = new Map();
   let placeholderId = 0;
 
-  for (const abb of SPANISH_ABBREVIATIONS) {
+  for (const abb of PROTECTED_ABBREVIATIONS) {
     const re = new RegExp('\\b' + abb, 'gi');
     protectedText = protectedText.replace(re, (match) => {
       const ph = `___ABB_${placeholderId++}___`;
@@ -64,6 +69,14 @@ export function splitTextIntoSentences(text) {
       return ph;
     });
   }
+
+  // Protect single-letter initials before capitalized names (e.g. "J. K. Rowling", "H. G. Wells")
+  // Negative lookbehind (?<![.\w]) ensures we don't match the final letter of dotted acronyms like "U.S.A."
+  protectedText = protectedText.replace(/(?<![.\w])([A-ZÁÉÍÓÚÑ])\.(?=\s+[A-ZÁÉÍÓÚÑ])/g, (match) => {
+    const ph = `___ABB_${placeholderId++}___`;
+    abbrevMap.set(ph, match);
+    return ph;
+  });
 
   // Also protect decimal numbers (e.g. 3.14, 10.5)
   protectedText = protectedText.replace(/(\d+)\.(\d+)/g, (match) => {
