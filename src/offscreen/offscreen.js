@@ -8,9 +8,9 @@ import { MESSAGE_TYPES, DEFAULT_MODEL_ID, DEFAULT_SETTINGS } from '../shared/con
 import { encodeWAV, encodeMP3, ProgressiveMp3Encoder, normalizeTextForSpeech, splitTextIntoSmartChunks, SmartTextSplitter, trimAudioSilence } from '../shared/audio-utils.js';
 import { saveAudioBlob, getAudioBlob } from '../shared/audio-storage.js';
 
-// Configure local WASM paths for ONNX Runtime Web
+// Configure local WASM paths for ONNX Runtime Web using static extension origin
 if (env) {
-  env.wasmPaths = chrome.runtime.getURL('src/libs/');
+  env.wasmPaths = new URL('../libs/', import.meta.url).href;
   env.numThreads = 1; // Prevent cross-origin pthread deadlock in Chrome extension
 }
 

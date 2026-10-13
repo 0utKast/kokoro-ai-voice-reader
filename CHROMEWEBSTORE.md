@@ -108,7 +108,8 @@ English
 ## Version History
 
 | Version | Date | Changes | Status |
-| 1.1.10 | 2026-10-13 | Reduced extension package size by 53% (47 MB to 22 MB), added real interactive karaoke audio seeking with instant PCM RAM caching and live voice/speed resynthesis, isolated floating selection pill in Shadow DOM, switched Readability to on-demand injection, and improved PDF memory cleanup and bilingual (ES/EN) abbreviation handling. | Ready for Submission |
+| 1.1.11 | 2026-10-13 | Fixed ONNX Runtime WebGPU dynamic module import failure (`ort-wasm-simd-threaded.jsep.mjs`) caused by `use_dynamic_url: true` generating UUID origins that conflicted with extension page CSP `script-src 'self'`. | Ready for Submission |
+| 1.1.10 | 2026-10-13 | Reduced extension package size by 53% (47 MB to 22 MB), added real interactive karaoke audio seeking with instant PCM RAM caching and live voice/speed resynthesis, isolated floating selection pill in Shadow DOM, switched Readability to on-demand injection, and improved PDF memory cleanup and bilingual (ES/EN) abbreviation handling. | Superseded |
 | 1.1.9 | 2026-10-13 | Fixed browser freeze caused by concurrent WebGPU pipeline executions using an asynchronous synthesis mutex and abort signaling. Enhanced UI cleanup when pasting or clearing text to immediately reset pending synthesis badges and download button state. | Superseded |
 | 1.1.8 | 2026-10-12 | Resolved `createBuffer` memory exhaustion (OOM crash) during long text/audiobook synthesis using a streaming lookahead audio queue (45s window), bounded synthesis backpressure, and strict tensor memory isolation (`pcm.slice()`). Hardened Web Audio node disconnection and immediate garbage collection. | Superseded |
 | 1.1.7 | 2026-10-12 | Restructured karaoke UI into continuous cohesive paragraphs with smooth auto-scroll and maximized reading canvas. Pinned controls dock and enhanced playback stability. | Published / Superseded |

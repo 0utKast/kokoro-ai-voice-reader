@@ -6,12 +6,8 @@
 import * as pdfjsLib from '../libs/pdf.min.mjs';
 import { normalizeTextForSpeech } from './audio-utils.js';
 
-// Configure Web Worker path for PDF.js inside Chrome Extension or Web/PWA
-if (typeof chrome !== 'undefined' && chrome.runtime?.getURL) {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('src/libs/pdf.worker.min.mjs');
-} else {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../libs/pdf.worker.min.mjs', import.meta.url).href;
-}
+// Configure Web Worker path for PDF.js using same-origin module URL
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../libs/pdf.worker.min.mjs', import.meta.url).href;
 
 /**
  * Extracts plain text from a PDF ArrayBuffer
