@@ -38,6 +38,8 @@ let totalScheduledChunks = 0;
 let completedChunks = 0;
 let isGenerationDone = false;
 let activeSessionId = 0;
+let activeGenerationPromise = null;
+let activeSplitter = null;
 let isConversionComplete = false;
 let totalExpectedChunks = 0;
 let convertedChunks = 0;
@@ -179,11 +181,14 @@ async function initKokoroEngine(preferredDevice = 'webgpu') {
 }
 
 // 4. Playback Controls
-function stopAudioPlayback() {
+function stopAudioPlayback(resetConversion = false) {
   abortGeneration = true;
   isPlaying = false;
   isPaused = false;
   isGenerationDone = false;
+  if (activeSplitter) {
+    activeSplitter.abort();
+  }
   pendingAudioQueue = [];
   progressiveMp3Encoder = null;
   nextStartTime = 0;
@@ -203,6 +208,14 @@ function stopAudioPlayback() {
   }
   activeSources = [];
 
+  if (resetConversion) {
+    isConversionComplete = false;
+    convertedChunks = 0;
+    totalExpectedChunks = 0;
+    currentSmartChunks = [];
+    currentChunkTexts = [];
+  }
+
   if (audioCtx && audioCtx.state === 'suspended') {
     audioCtx.resume().catch(() => {});
   }
@@ -211,12 +224,36 @@ function stopAudioPlayback() {
     type: MESSAGE_TYPES.PLAYBACK_STATE,
     isPlaying: false,
     isPaused: false,
+    chunkIndex: -1,
     isConversionComplete: isConversionComplete,
     conversionProgress: isConversionComplete ? 100 : 0
   }).catch(() => {});
 }
 
 async function playText(text, options = {}) {
+  // 1. Mutual exclusion: If another generation is currently running on the GPU, abort it and await completion
+  while (activeGenerationPromise) {
+    abortGeneration = true;
+    activeSessionId++;
+    if (activeSplitter) {
+      activeSplitter.abort();
+    }
+    const running = activeGenerationPromise;
+    try {
+      await Promise.race([
+        running,
+        new Promise(r => setTimeout(r, 1500)) // 1.5s timeout guard to prevent deadlocks
+      ]);
+    } catch (e) {
+      console.warn('[Kokoro Engine] Advertencia esperando limpieza de sesión anterior:', e);
+    }
+    if (activeGenerationPromise === running) {
+      activeGenerationPromise = null;
+      activeSplitter = null;
+      break;
+    }
+  }
+
   stopAudioPlayback();
   abortGeneration = false;
   isGenerationDone = false;
@@ -256,6 +293,7 @@ async function playText(text, options = {}) {
   currentSmartChunks = smartChunks;
 
   const splitter = new SmartTextSplitter(smartChunks);
+  activeSplitter = splitter;
   totalExpectedChunks = smartChunks.length;
 
   chrome.runtime.sendMessage({
@@ -269,166 +307,179 @@ async function playText(text, options = {}) {
     isConversionComplete: false
   }).catch(() => {});
 
-  try {
-    const model = await initKokoroEngine(options.device || currentDevice);
+  let myGenerationPromise = null;
+  myGenerationPromise = (async () => {
+    try {
+      const model = await initKokoroEngine(options.device || currentDevice);
 
-    let chunkIndex = 0;
-    const chunkTexts = [];
+      let chunkIndex = 0;
+      const chunkTexts = [];
 
-    // Stream chunks continuously with KokoroTTS using the pre-split stream
-    for await (const chunk of model.stream(splitter, { voice: currentVoice, speed: currentSpeed })) {
-      if (abortGeneration || activeSessionId !== sessionId) break;
+      // Stream chunks continuously with KokoroTTS using the pre-split stream
+      for await (const chunk of model.stream(splitter, { voice: currentVoice, speed: currentSpeed })) {
+        if (abortGeneration || activeSessionId !== sessionId) break;
 
-      const rawPcm = chunk.audio?.audio;
-      if (!rawPcm || rawPcm.length === 0) {
-        continue;
-      }
-
-      // Trim excessive silence padding from neural vocoder output for seamless streaming
-      const cleanPcm = trimAudioSilence(rawPcm, chunk.audio.sampling_rate || 24000, 20, 40);
-
-      // Feed directly into incremental MP3 encoder (low memory, instant readiness)
-      if (progressiveMp3Encoder) {
-        try {
-          progressiveMp3Encoder.feed(cleanPcm);
-        } catch (encErr) {
-          console.warn('Error en codificador progresivo MP3:', encErr);
+        const rawPcm = chunk.audio?.audio;
+        if (!rawPcm || rawPcm.length === 0) {
+          continue;
         }
-      }
 
-      chunkTexts.push(chunk.text);
-      currentChunkTexts = chunkTexts;
+        // Trim excessive silence padding from neural vocoder output for seamless streaming
+        const cleanPcm = trimAudioSilence(rawPcm, chunk.audio.sampling_rate || 24000, 20, 40);
 
-      totalScheduledChunks++;
-      convertedChunks++;
-      const conversionPct = totalExpectedChunks > 0 
-        ? Math.min(100, Math.round((convertedChunks / totalExpectedChunks) * 100)) 
-        : 100;
-
-      // Update side panel with streaming audio and live conversion progress
-      chrome.runtime.sendMessage({
-        type: MESSAGE_TYPES.PLAYBACK_STATE,
-        isPlaying: isPlaying,
-        isPaused: isPaused,
-        totalChunks: totalScheduledChunks,
-        chunks: currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts,
-        conversionProgress: conversionPct,
-        convertedChunks: convertedChunks,
-        totalExpectedChunks: totalExpectedChunks,
-        isConversionComplete: false
-      }).catch(() => {});
-
-      const isParagraphEnd = splitter.chunkMetadata[chunkIndex]?.isParagraphEnd ?? false;
-
-      // Enqueue chunk in pendingAudioQueue for just-in-time Web Audio allocation
-      pendingAudioQueue.push({
-        pcm: cleanPcm,
-        chunkIndex: chunkIndex++,
-        text: chunk.text,
-        isParagraphEnd,
-        sampleRate: chunk.audio.sampling_rate || 24000
-      });
-
-      // Schedule into Web Audio API if lookahead buffer needs filling
-      schedulePendingAudioChunks();
-
-      // Backpressure: If queue is already ahead by several minutes, pause generator to keep memory flat
-      while (pendingAudioQueue.length >= MAX_PENDING_QUEUE_CHUNKS && !abortGeneration && activeSessionId === sessionId) {
-        await new Promise(r => setTimeout(r, isPaused ? 300 : 150));
-      }
-    }
-
-    if (!abortGeneration && activeSessionId === sessionId) {
-      isGenerationDone = true;
-      isConversionComplete = true;
-
-      // Finalize MP3 and store into IndexedDB immediately (instant download ready)
-      let mp3Blob = null;
-      if (progressiveMp3Encoder) {
-        try {
-          mp3Blob = progressiveMp3Encoder.finish();
-        } catch (encErr) {
-          console.error('Error finalizando codificador progresivo MP3:', encErr);
+        // Feed directly into incremental MP3 encoder (low memory, instant readiness)
+        if (progressiveMp3Encoder) {
+          try {
+            progressiveMp3Encoder.feed(cleanPcm);
+          } catch (encErr) {
+            console.warn('Error en codificador progresivo MP3:', encErr);
+          }
         }
-      }
 
-      if (mp3Blob && mp3Blob.size > 0) {
-        const duration = progressiveMp3Encoder?.durationSeconds || 0;
-        const metadata = {
-          format: 'mp3',
+        chunkTexts.push(chunk.text);
+        currentChunkTexts = chunkTexts;
+
+        totalScheduledChunks++;
+        convertedChunks++;
+        const conversionPct = totalExpectedChunks > 0 
+          ? Math.min(100, Math.round((convertedChunks / totalExpectedChunks) * 100)) 
+          : 100;
+
+        // Update side panel with streaming audio and live conversion progress
+        chrome.runtime.sendMessage({
+          type: MESSAGE_TYPES.PLAYBACK_STATE,
+          isPlaying: isPlaying,
+          isPaused: isPaused,
           totalChunks: totalScheduledChunks,
-          duration: duration,
-          size: mp3Blob.size,
-          updatedAt: Date.now(),
-          title: options.title || '',
-          text: text,
           chunks: currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts,
-          voice: currentVoice,
-          speed: currentSpeed
-        };
+          conversionProgress: conversionPct,
+          convertedChunks: convertedChunks,
+          totalExpectedChunks: totalExpectedChunks,
+          isConversionComplete: false
+        }).catch(() => {});
 
-        try {
-          await saveAudioBlob('latest_book_audio', mp3Blob, metadata);
-          console.log(`[Kokoro] Audio MP3 persistente guardado en IndexedDB: ${(mp3Blob.size / 1024 / 1024).toFixed(2)} MB (${duration.toFixed(1)}s)`);
-        } catch (storageErr) {
-          console.error('Error guardando audio MP3 en IndexedDB:', storageErr);
-        }
+        const isParagraphEnd = splitter.chunkMetadata[chunkIndex]?.isParagraphEnd ?? false;
 
-        // Save lightweight persistent metadata in chrome.storage.local for instantaneous recovery
-        try {
-          await chrome.storage.local.set({
-            kokoro_last_conversion: {
-              hasAudio: true,
-              storageKey: 'latest_book_audio',
-              format: 'mp3',
-              size: mp3Blob.size,
-              duration: duration,
-              title: metadata.title,
-              text: text,
-              chunks: currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts,
-              totalChunks: totalScheduledChunks,
-              voice: currentVoice,
-              speed: currentSpeed,
-              timestamp: metadata.updatedAt
-            }
-          });
-        } catch (metaErr) {
-          console.warn('Error guardando metadatos en chrome.storage.local:', metaErr);
+        // Enqueue chunk in pendingAudioQueue for just-in-time Web Audio allocation
+        pendingAudioQueue.push({
+          pcm: cleanPcm,
+          chunkIndex: chunkIndex++,
+          text: chunk.text,
+          isParagraphEnd,
+          sampleRate: chunk.audio.sampling_rate || 24000
+        });
+
+        // Schedule into Web Audio API if lookahead buffer needs filling
+        schedulePendingAudioChunks();
+
+        // Backpressure: If queue is already ahead by several minutes, pause generator to keep memory flat
+        while (pendingAudioQueue.length >= MAX_PENDING_QUEUE_CHUNKS && !abortGeneration && activeSessionId === sessionId) {
+          await new Promise(r => setTimeout(r, isPaused ? 300 : 150));
         }
       }
 
-      chrome.runtime.sendMessage({
-        type: MESSAGE_TYPES.PLAYBACK_STATE,
-        isPlaying: isPlaying,
-        isPaused: isPaused,
-        totalChunks: totalScheduledChunks,
-        chunks: chunkTexts,
-        conversionProgress: 100,
-        convertedChunks: totalScheduledChunks,
-        totalExpectedChunks: totalScheduledChunks,
-        isConversionComplete: true
-      }).catch(() => {});
-    }
+      if (!abortGeneration && activeSessionId === sessionId) {
+        isGenerationDone = true;
+        isConversionComplete = true;
 
-    // If all audio already finished playing before generation loop concluded
-    if (completedChunks >= totalScheduledChunks && activeSources.length === 0 && pendingAudioQueue.length === 0) {
-      isPlaying = false;
-      chrome.runtime.sendMessage({
-        type: MESSAGE_TYPES.PLAYBACK_STATE,
-        isPlaying: false,
-        isPaused: false,
-        finished: true,
-        isConversionComplete: true
-      }).catch(() => {});
+        // Finalize MP3 and store into IndexedDB immediately (instant download ready)
+        let mp3Blob = null;
+        if (progressiveMp3Encoder) {
+          try {
+            mp3Blob = progressiveMp3Encoder.finish();
+          } catch (encErr) {
+            console.error('Error finalizando codificador progresivo MP3:', encErr);
+          }
+        }
+
+        if (mp3Blob && mp3Blob.size > 0) {
+          const duration = progressiveMp3Encoder?.durationSeconds || 0;
+          const metadata = {
+            format: 'mp3',
+            totalChunks: totalScheduledChunks,
+            duration: duration,
+            size: mp3Blob.size,
+            updatedAt: Date.now(),
+            title: options.title || '',
+            text: text,
+            chunks: currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts,
+            voice: currentVoice,
+            speed: currentSpeed
+          };
+
+          try {
+            await saveAudioBlob('latest_book_audio', mp3Blob, metadata);
+            console.log(`[Kokoro] Audio MP3 persistente guardado en IndexedDB: ${(mp3Blob.size / 1024 / 1024).toFixed(2)} MB (${duration.toFixed(1)}s)`);
+          } catch (storageErr) {
+            console.error('Error guardando audio MP3 en IndexedDB:', storageErr);
+          }
+
+          // Save lightweight persistent metadata in chrome.storage.local for instantaneous recovery
+          try {
+            await chrome.storage.local.set({
+              kokoro_last_conversion: {
+                hasAudio: true,
+                storageKey: 'latest_book_audio',
+                format: 'mp3',
+                size: mp3Blob.size,
+                duration: duration,
+                title: metadata.title,
+                text: text,
+                chunks: currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts,
+                totalChunks: totalScheduledChunks,
+                voice: currentVoice,
+                speed: currentSpeed,
+                timestamp: metadata.updatedAt
+              }
+            });
+          } catch (metaErr) {
+            console.warn('Error guardando metadatos en chrome.storage.local:', metaErr);
+          }
+        }
+
+        chrome.runtime.sendMessage({
+          type: MESSAGE_TYPES.PLAYBACK_STATE,
+          isPlaying: isPlaying,
+          isPaused: isPaused,
+          totalChunks: totalScheduledChunks,
+          chunks: currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts,
+          conversionProgress: 100,
+          convertedChunks: totalScheduledChunks,
+          totalExpectedChunks: totalScheduledChunks,
+          isConversionComplete: true
+        }).catch(() => {});
+      }
+
+      // If all audio already finished playing before generation loop concluded
+      if (completedChunks >= totalScheduledChunks && activeSources.length === 0 && pendingAudioQueue.length === 0) {
+        isPlaying = false;
+        chrome.runtime.sendMessage({
+          type: MESSAGE_TYPES.PLAYBACK_STATE,
+          isPlaying: false,
+          isPaused: false,
+          finished: true,
+          isConversionComplete: true
+        }).catch(() => {});
+      }
+    } catch (err) {
+      if (activeSessionId === sessionId) {
+        console.error('Synthesis error during streaming:', err);
+        stopAudioPlayback();
+        chrome.runtime.sendMessage({
+          type: MESSAGE_TYPES.MODEL_ERROR,
+          error: `Error durante la síntesis: ${err.message}`
+        }).catch(() => {});
+      }
+    } finally {
+      if (activeGenerationPromise === myGenerationPromise) {
+        activeGenerationPromise = null;
+        activeSplitter = null;
+      }
     }
-  } catch (err) {
-    console.error('Synthesis error during streaming:', err);
-    stopAudioPlayback();
-    chrome.runtime.sendMessage({
-      type: MESSAGE_TYPES.MODEL_ERROR,
-      error: `Error durante la síntesis: ${err.message}`
-    }).catch(() => {});
-  }
+  })();
+  activeGenerationPromise = myGenerationPromise;
+
+  return myGenerationPromise;
 }
 
 function safeCreateAudioBuffer(ctx, channels, length, sampleRate = 24000) {
@@ -460,14 +511,15 @@ function cleanupFinishedSources() {
   const now = audioCtx.currentTime;
   for (let i = activeSources.length - 1; i >= 0; i--) {
     const src = activeSources[i];
-    if (src._endTime && src._endTime <= now) {
+    // Only clean up nodes that finished more than 1 second ago and somehow missed onended
+    if (src._endTime && src._endTime + 1.0 <= now) {
       try {
         src.onended = null;
-        src.stop(0);
         src.disconnect();
         src.buffer = null;
       } catch {}
       activeSources.splice(i, 1);
+      completedChunks++;
     }
   }
 }
@@ -650,14 +702,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
 
+      case "RESET_STATE": {
+        stopAudioPlayback(true);
+        sendResponse({ success: true });
+        break;
+      }
+
       case MESSAGE_TYPES.PLAY_TEXT: {
-        await playText(message.text, {
+        playText(message.text, {
           voice: message.voice,
           speed: message.speed,
           volume: message.volume,
-          device: message.device
+          device: message.device,
+          title: message.title
+        }).catch((err) => {
+          console.error('[Kokoro Engine] playText error:', err);
         });
-        sendResponse({ success: true });
+        sendResponse({ success: true, started: true });
         break;
       }
 
@@ -699,7 +760,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case MESSAGE_TYPES.STOP_PLAYBACK: {
-        stopAudioPlayback();
+        stopAudioPlayback(Boolean(message.reset));
         sendResponse({ success: true });
         break;
       }

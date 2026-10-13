@@ -614,10 +614,10 @@ function cleanupFinishedSources() {
   const now = audioCtx.currentTime;
   for (let i = activeSources.length - 1; i >= 0; i--) {
     const src = activeSources[i];
-    if (src._endTime && src._endTime <= now) {
+    // Only clean up nodes that finished more than 1 second ago and missed their onended event
+    if (src._endTime && src._endTime + 1.0 <= now) {
       try {
         src.onended = null;
-        src.stop(0);
         src.disconnect();
         src.buffer = null;
       } catch {}

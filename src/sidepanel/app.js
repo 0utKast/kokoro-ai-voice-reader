@@ -57,6 +57,7 @@ let currentChunks = [];
 let activeChunkIndex = 0;
 let totalExpectedChunks = 0;
 let isConversionComplete = false;
+let lastConvertedText = '';
 let currentKaraokeFontSize = 14.5;
 
 // 1. Initialization
@@ -140,6 +141,9 @@ async function restoreLastConversion() {
       // Restore text in editor if empty
       if (!textInput.value.trim() && (last?.text || record.text)) {
         textInput.value = last?.text || record.text;
+        lastConvertedText = normalizeTextForSpeech(textInput.value.trim());
+      } else if (textInput.value.trim()) {
+        lastConvertedText = normalizeTextForSpeech(textInput.value.trim());
       }
 
       // Restore chunks if available
@@ -477,6 +481,7 @@ async function startPlayback() {
   }
 
   const text = normalizeTextForSpeech(rawText);
+  lastConvertedText = text;
 
   isConversionComplete = false;
   totalExpectedChunks = 0;
@@ -530,18 +535,55 @@ async function startPlayback() {
 }
 
 async function pausePlayback() {
-  await chrome.runtime.sendMessage({ type: MESSAGE_TYPES.PAUSE_PLAYBACK });
+  await chrome.runtime.sendMessage({ type: MESSAGE_TYPES.PAUSE_PLAYBACK }).catch(() => {});
   updatePlayPauseUI(true, true);
 }
 
 async function resumePlayback() {
-  await chrome.runtime.sendMessage({ type: MESSAGE_TYPES.RESUME_PLAYBACK });
+  await chrome.runtime.sendMessage({ type: MESSAGE_TYPES.RESUME_PLAYBACK }).catch(() => {});
   updatePlayPauseUI(true, false);
 }
 
-async function stopPlayback() {
-  await chrome.runtime.sendMessage({ type: MESSAGE_TYPES.STOP_PLAYBACK });
+async function stopPlayback(reset = false) {
+  await chrome.runtime.sendMessage({ type: MESSAGE_TYPES.STOP_PLAYBACK, reset }).catch(() => {});
   updatePlayPauseUI(false, false);
+}
+
+function resetConversionState({ clearStorage = false } = {}) {
+  isConversionComplete = false;
+  totalExpectedChunks = 0;
+  lastConvertedText = '';
+  currentChunks = [];
+  activeChunkIndex = -1;
+
+  if (karaokeChunksContainer) {
+    karaokeChunksContainer.innerHTML = '';
+  }
+  if (playbackStatusBar) {
+    playbackStatusBar.classList.add('hidden');
+  }
+  if (currentChunkBadge) {
+    currentChunkBadge.textContent = '🔊 Frase 0 de 0';
+  }
+  if (conversionStatusBadge) {
+    conversionStatusBadge.textContent = '⚡ En espera';
+    conversionStatusBadge.classList.remove('done');
+  }
+  if (conversionProgressFill) {
+    conversionProgressFill.style.width = '0%';
+    conversionProgressFill.classList.remove('done');
+  }
+
+  btnDownloadAudio.disabled = true;
+  btnDownloadAudio.classList.remove('btn-download-ready');
+  if (btnDownloadText) btnDownloadText.textContent = 'Descargar MP3';
+  btnDownloadAudio.title = 'Inicia la lectura para sintetizar y descargar el audio MP3';
+
+  if (clearStorage) {
+    clearAudioBlobs().catch(() => {});
+    chrome.storage.local.remove('kokoro_last_conversion').catch(() => {});
+  }
+  chrome.runtime.sendMessage({ type: 'RESET_STATE' }).catch(() => {});
 }
 
 // 4. Setup Event Listeners
@@ -729,6 +771,7 @@ function setupEventListeners() {
       }
 
       if (text && text.length > 0) {
+        resetConversionState({ clearStorage: false });
         currentDocumentTitle = tab.title ? tab.title.slice(0, 40) : 'articulo_web';
         textInput.value = normalizeTextForSpeech(text);
         const originalHTML = btnExtractArticle.innerHTML;
@@ -796,6 +839,7 @@ function setupEventListeners() {
           modelProgressBar.style.width = `${Math.round((page / total) * 100)}%`;
         });
         if (extracted && extracted.trim()) {
+          resetConversionState({ clearStorage: false });
           currentDocumentTitle = file.name.replace(/\.[^/.]+$/, '');
           textInput.value = normalizeTextForSpeech(extracted);
           modelStatusText.textContent = `✓ PDF cargado: ${file.name}`;
@@ -807,6 +851,7 @@ function setupEventListeners() {
           modelPercentText.textContent = '⚠️';
         }
       } else {
+        resetConversionState({ clearStorage: false });
         currentDocumentTitle = file.name.replace(/\.[^/.]+$/, '');
         const rawText = await file.text();
         textInput.value = normalizeTextForSpeech(rawText);
@@ -824,25 +869,18 @@ function setupEventListeners() {
 
   // Clear text
   btnClearText.addEventListener('click', async () => {
-    await stopPlayback();
+    await stopPlayback(true);
     textInput.value = '';
     textInput.focus();
     currentDocumentTitle = '';
-    await clearAudioBlobs().catch(() => {});
-    await chrome.storage.local.remove('kokoro_last_conversion').catch(() => {});
-    isConversionComplete = false;
-    totalExpectedChunks = 0;
-    btnDownloadAudio.disabled = true;
-    btnDownloadAudio.classList.remove('btn-download-ready');
-    if (btnDownloadText) btnDownloadText.textContent = 'Descargar MP3';
-    btnDownloadAudio.title = 'Inicia la lectura para sintetizar y descargar el audio MP3';
-    if (conversionProgressFill) {
-      conversionProgressFill.style.width = '0%';
-      conversionProgressFill.classList.remove('done');
-    }
-    if (conversionStatusBadge) {
-      conversionStatusBadge.textContent = '⚡ En espera';
-      conversionStatusBadge.classList.remove('done');
+    resetConversionState({ clearStorage: true });
+  });
+
+  // Reset conversion state when user types or pastes new text so stale badges don't linger
+  textInput.addEventListener('input', () => {
+    const currentText = normalizeTextForSpeech(textInput.value.trim());
+    if (isConversionComplete && currentText !== lastConvertedText) {
+      resetConversionState({ clearStorage: false });
     }
   });
 
@@ -1061,6 +1099,7 @@ function setupEventListeners() {
 
       case 'SELECTION_TEXT_LOADED': {
         if (message.text && textInput) {
+          resetConversionState({ clearStorage: false });
           textInput.value = message.text;
         }
         break;

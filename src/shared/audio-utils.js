@@ -191,6 +191,17 @@ export class SmartTextSplitter extends TextSplitterStream {
     this._closed = true;
   }
 
+  abort() {
+    this._sentences = [];
+    this._allChunks = [];
+    this._closed = true;
+    if (typeof this._resolve === 'function') {
+      try {
+        this._resolve();
+      } catch {}
+    }
+  }
+
   get chunkMetadata() {
     return this._chunkObjects;
   }
