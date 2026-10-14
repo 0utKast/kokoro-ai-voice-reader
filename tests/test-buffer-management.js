@@ -1,8 +1,8 @@
 /**
- * Test Suite: Audio Buffer Management, Memory Isolation & Lookahead Scheduling
+ * Test Suite: Audio Buffer Management, Memory Isolation, Lookahead Scheduling & 10x Hybrid Swap
  */
 
-import { trimAudioSilence } from '../src/shared/audio-utils.js';
+import { trimAudioSilence, float32ToInt16, int16ToFloat32, ProgressiveMp3Encoder } from '../src/shared/audio-utils.js';
 
 let passed = 0;
 let total = 0;
@@ -19,7 +19,7 @@ function assert(cond, msg) {
 }
 
 console.log('====================================================');
-console.log('🧪 VERIFICACIÓN DE GESTIÓN DE BUFFER Y MEMORIA DE AUDIO');
+console.log('🧪 VERIFICACIÓN DE GESTIÓN DE BUFFER, 10x CONVERSIÓN Y SWAP');
 console.log('====================================================\n');
 
 // Test 1: trimAudioSilence returns independent slice (memory isolation)
@@ -37,24 +37,83 @@ console.log('🔹 Test 1: Aislamiento de memoria en trimAudioSilence');
   assert(trimmed.buffer.byteLength < bigArray.buffer.byteLength, 'El buffer recortado ocupa sustancialmente menos memoria');
 }
 
-// Test 2: Lookahead Buffer Scheduling Simulation
-console.log('\n🔹 Test 2: Simulación de cola de streaming con Lookahead Buffer');
+// Test 2: Compact Int16 PCM conversion (50% memory reduction) & MP3 zero-copy feed
+console.log('\n🔹 Test 2: Conversión compacta Float32 <-> Int16 y codificación MP3 directa');
+{
+  const samples = new Float32Array([0, 0.5, -0.5, 1.0, -1.0, 0.25]);
+  const int16 = float32ToInt16(samples);
+  assert(int16 instanceof Int16Array, 'float32ToInt16 retorna un Int16Array');
+  assert(int16.byteLength === samples.byteLength / 2, 'Int16Array ocupa exactamente el 50% de RAM que Float32Array');
+
+  const restored = int16ToFloat32(int16);
+  assert(restored instanceof Float32Array, 'int16ToFloat32 restaura un Float32Array para Web Audio API');
+  assert(Math.abs(restored[1] - 0.5) < 0.001, 'Precisión de +0.5 preservada (< 0.001 error)');
+  assert(Math.abs(restored[2] - (-0.5)) < 0.001, 'Precisión de -0.5 preservada (< 0.001 error)');
+
+  let receivedSubarray = null;
+  globalThis.lamejs = {
+    Mp3Encoder: class {
+      encodeBuffer(sub) {
+        receivedSubarray = sub;
+        return new Int8Array([1, 2, 3]);
+      }
+      flush() {
+        return new Int8Array([4]);
+      }
+    }
+  };
+  const encoder = new ProgressiveMp3Encoder(24000, 64);
+  const synthInt16 = float32ToInt16(new Float32Array(24000).fill(0.1));
+  encoder.feed(synthInt16);
+  assert(Math.abs(encoder.durationSeconds - 1.0) < 0.01, 'ProgressiveMp3Encoder acepta Int16Array directamente sin reconversión redundante');
+  assert(receivedSubarray instanceof Int16Array && receivedSubarray.buffer === synthInt16.buffer, 'ProgressiveMp3Encoder.feed usa zero-copy subarray sobre el Int16Array existente');
+}
+
+// Test 3: 10x Unthrottled Synthesis + 45s Web Audio Lookahead + 64-chunk RAM Sliding Window & Swap
+console.log('\n🔹 Test 3: Síntesis 10x sin freno con ventana RAM de 64 fragmentos y Swap en disco para 1545 frases');
 {
   const LOOKAHEAD_BUFFER_SEC = 45;
-  const MAX_PENDING_QUEUE_CHUNKS = 8;
-  
+  const MAX_RAM_QUEUE_CHUNKS = 64;
+  const HYDRATE_RAM_THRESHOLD = 32;
+  const TOTAL_BOOK_CHUNKS = 1545;
+
   let audioContextCurrentTime = 0.0;
   let nextStartTime = 0.05;
   let pendingAudioQueue = [];
   let activeSources = [];
-  let scheduledChunks = [];
+  let swapStore = new Map();
   let maxActiveSourcesEver = 0;
-  let maxPendingQueueEver = 0;
+  let maxRamChunksEver = 0;
+  let chunksSynthesized = 0;
+  let chunksPlayed = 0;
+
+  function countRamChunks() {
+    let count = 0;
+    for (let i = 0; i < pendingAudioQueue.length; i++) {
+      if (pendingAudioQueue[i].pcm !== null) count++;
+    }
+    return count;
+  }
+
+  function hydrateFromSwap() {
+    let inRam = countRamChunks();
+    if (inRam >= HYDRATE_RAM_THRESHOLD) return;
+    for (let i = 0; i < pendingAudioQueue.length && inRam < MAX_RAM_QUEUE_CHUNKS; i++) {
+      const item = pendingAudioQueue[i];
+      if (item.spilled && item.pcm === null) {
+        item.pcm = swapStore.get(item.chunkIndex);
+        item.spilled = false;
+        swapStore.delete(item.chunkIndex);
+        inRam++;
+      }
+    }
+  }
 
   function cleanupFinishedSources(currentTime) {
     for (let i = activeSources.length - 1; i >= 0; i--) {
       if (activeSources[i].endTime <= currentTime) {
         activeSources.splice(i, 1);
+        chunksPlayed++;
       }
     }
   }
@@ -66,52 +125,74 @@ console.log('\n🔹 Test 2: Simulación de cola de streaming con Lookahead Buffe
       if (bufferedAhead >= LOOKAHEAD_BUFFER_SEC && activeSources.length >= 2) {
         break;
       }
+      if (pendingAudioQueue[0].pcm === null) {
+        hydrateFromSwap();
+      }
       const item = pendingAudioQueue.shift();
-      if (!item) break;
+      if (!item || item.pcm === null) break;
 
-      const duration = item.pcmLength / 24000;
+      const duration = item.pcm / 24000;
       const startTime = Math.max(audioContextCurrentTime + 0.05, nextStartTime);
       const endTime = startTime + duration;
       nextStartTime = endTime + 0.015;
 
       activeSources.push({ chunkIndex: item.chunkIndex, startTime, endTime, duration });
-      scheduledChunks.push({ chunkIndex: item.chunkIndex, startTime, endTime });
     }
     if (activeSources.length > maxActiveSourcesEver) {
       maxActiveSourcesEver = activeSources.length;
     }
+    hydrateFromSwap();
   }
 
-  // Simulate synthesizing 100 chunks (~38 minutes = 2,280s of audio)
-  const TOTAL_CHUNKS = 100;
-  let chunksSynthesized = 0;
-
-  for (let step = 0; step < 1000; step++) {
-    // Advance real-time playback by 2.5 seconds per step
-    audioContextCurrentTime += 2.5;
-    cleanupFinishedSources(audioContextCurrentTime);
-    schedulePendingAudioChunks();
-
-    // Model generates chunks if pendingAudioQueue < MAX_PENDING_QUEUE_CHUNKS
-    if (chunksSynthesized < TOTAL_CHUNKS && pendingAudioQueue.length < MAX_PENDING_QUEUE_CHUNKS) {
-      pendingAudioQueue.push({
-        pcmLength: 547017, // ~22.8s of speech
-        chunkIndex: chunksSynthesized++
-      });
-      if (pendingAudioQueue.length > maxPendingQueueEver) {
-        maxPendingQueueEver = pendingAudioQueue.length;
-      }
-      schedulePendingAudioChunks();
+  function hasSpilledChunks() {
+    for (let i = 0; i < pendingAudioQueue.length; i++) {
+      if (pendingAudioQueue[i].spilled && pendingAudioQueue[i].pcm === null) return true;
     }
+    return false;
   }
 
-  assert(chunksSynthesized === TOTAL_CHUNKS, `Se sintetizaron los ${TOTAL_CHUNKS} fragmentos`);
-  assert(maxActiveSourcesEver <= 3, `Fuentes activas en Web Audio API limitadas (máx observado: ${maxActiveSourcesEver} <= 3)`);
-  assert(maxPendingQueueEver <= MAX_PENDING_QUEUE_CHUNKS, `Cola pendiente respetó el límite de contrapresión (máx: ${maxPendingQueueEver} <= 8)`);
+  // Phase A: Model synthesizes at 10x real-time speed!
+  // For every 1 chunk played (~10s), the model synthesizes 10 chunks.
+  while (chunksSynthesized < TOTAL_BOOK_CHUNKS) {
+    // Model produces 10 chunks per step
+    for (let g = 0; g < 10 && chunksSynthesized < TOTAL_BOOK_CHUNKS; g++) {
+      const idx = chunksSynthesized++;
+      const currentRam = countRamChunks();
+      if (!hasSpilledChunks() && currentRam < MAX_RAM_QUEUE_CHUNKS) {
+        pendingAudioQueue.push({ chunkIndex: idx, pcm: 240000, spilled: false });
+      } else {
+        swapStore.set(idx, 240000);
+        pendingAudioQueue.push({ chunkIndex: idx, pcm: null, spilled: true });
+      }
+      const ramNow = countRamChunks();
+      if (ramNow > maxRamChunksEver) maxRamChunksEver = ramNow;
+    }
+    // Real-time playback advances by 1 chunk (~10s)
+    audioContextCurrentTime += 10.0;
+    schedulePendingAudioChunks();
+  }
+
+  // At the moment all 1,545 chunks finish transcribing (100% MP3 ready!),
+  // streaming is around ~10% of the book (~154 chunks played).
+  assert(chunksSynthesized === TOTAL_BOOK_CHUNKS, `Los ${TOTAL_BOOK_CHUNKS} fragmentos se transcribieron al 100% a velocidad 10x sin bloquearse`);
+  assert(chunksPlayed < 200, `La transcripción (1545) terminó mucho antes que el streaming (reproducidos: ${chunksPlayed})`);
+  assert(maxRamChunksEver <= MAX_RAM_QUEUE_CHUNKS, `La ventana en RAM nunca superó ${MAX_RAM_QUEUE_CHUNKS} fragmentos (máx: ${maxRamChunksEver})`);
+  assert(maxActiveSourcesEver <= 6, `Web Audio API mantuvo solo ~45s de audio programado (máx nodos activos: ${maxActiveSourcesEver})`);
+
+  // Phase B: Streaming continues playing the remaining ~1,390 chunks seamlessly from RAM + Swap
+  while (pendingAudioQueue.length > 0 || activeSources.length > 0) {
+    audioContextCurrentTime += 10.0;
+    schedulePendingAudioChunks();
+    const ramNow = countRamChunks();
+    if (ramNow > maxRamChunksEver) maxRamChunksEver = ramNow;
+  }
+
+  assert(chunksPlayed === TOTAL_BOOK_CHUNKS, `Los ${TOTAL_BOOK_CHUNKS} fragmentos se reprodujeron íntegramente hasta el final sin cortes`);
+  assert(swapStore.size === 0, 'Todos los fragmentos del Swap temporal en IndexedDB fueron hidratados y limpiados');
 }
 
-// Test 3: Safe AudioBuffer Creation & Node Lifecycle Cleanup
-console.log('\n🔹 Test 3: Limpieza y ciclo de vida de nodos de audio');
+// Test 4: Safe AudioBuffer Creation & Node Lifecycle Cleanup
+console.log('\n🔹 Test 4: Limpieza y ciclo de vida de nodos de audio');
 {
   class MockAudioNode {
     constructor() {
@@ -135,5 +216,6 @@ console.log('\n🔹 Test 3: Limpieza y ciclo de vida de nodos de audio');
 }
 
 console.log('\n====================================================');
-console.log(`🎉 TODAS LAS PRUEBAS DE BUFFER COMPLETADAS: ${passed} / ${total} EXITOSAS`);
+console.log(`🎉 TODAS LAS PRUEBAS DE BUFFER Y 10x SWAP COMPLETADAS: ${passed} / ${total} EXITOSAS`);
 console.log('====================================================');
+

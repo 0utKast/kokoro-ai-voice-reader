@@ -107,7 +107,19 @@ async function syncPlaybackState() {
       if (typeof state.chunkIndex === 'number' && state.chunkIndex >= 0) {
         setActiveKaraokeChunk(state.chunkIndex);
       }
-      updatePlayPauseUI(state.isPlaying, state.isPaused);
+      updatePlayPauseUI(state.isPlaying, state.isPaused, state.isConverting);
+      updateConversionUI(state);
+      return true;
+    } else if (state?.isConverting) {
+      if (!textInput.value.trim() && session?.text) {
+        textInput.value = session.text;
+        lastConvertedText = normalizeTextForSpeech(session.text);
+      }
+      if (state.chunks && state.chunks.length > 0) {
+        currentChunks = state.chunks;
+      }
+      totalExpectedChunks = state.totalExpectedChunks || state.totalChunks || 0;
+      updatePlayPauseUI(false, false, true);
       updateConversionUI(state);
       return true;
     } else if (state?.isConversionComplete) {
@@ -252,7 +264,7 @@ async function checkHardwareStatus() {
 }
 
 // 2. Playback UI Sync
-function updatePlayPauseUI(playing, paused) {
+function updatePlayPauseUI(playing, paused, converting = false) {
   isPlaying = playing;
   isPaused = paused;
 
@@ -269,6 +281,9 @@ function updatePlayPauseUI(playing, paused) {
     document.body.classList.add('karaoke-active');
     iconPlay.classList.remove('hidden');
     iconPause.classList.add('hidden');
+    textInput.classList.add('hidden');
+    karaokeDisplay.classList.remove('hidden');
+    playbackStatusBar.classList.remove('hidden');
     btnEditMode?.classList.remove('hidden');
     fontSizeControls?.classList.remove('hidden');
   } else {
@@ -280,7 +295,9 @@ function updatePlayPauseUI(playing, paused) {
     karaokeDisplay.classList.add('hidden');
     btnEditMode?.classList.add('hidden');
     fontSizeControls?.classList.add('hidden');
-    if (!isConversionComplete) {
+    if (isConversionComplete || converting) {
+      playbackStatusBar.classList.remove('hidden');
+    } else {
       playbackStatusBar.classList.add('hidden');
     }
   }
@@ -294,6 +311,7 @@ function updateConversionUI(info) {
   }
 
   const conversionDone = Boolean(isConversionComplete || info.isConversionComplete);
+  const isBgConverting = Boolean(info.isConverting && !conversionDone);
   const pct = typeof info.conversionProgress === 'number' 
     ? info.conversionProgress 
     : (conversionDone ? 100 : 0);
@@ -322,13 +340,21 @@ function updateConversionUI(info) {
     }
   }
 
+  if (!info.isPlaying && currentChunkBadge) {
+    if (conversionDone && total > 0) {
+      currentChunkBadge.textContent = `🔊 Audio listo (${total} frases)`;
+    } else if (isBgConverting) {
+      currentChunkBadge.textContent = `🔇 Streaming detenido`;
+    }
+  }
+
   // Manage MP3 download button state: Once converted, keep ready and active!
   if (conversionDone) {
     btnDownloadAudio.disabled = false;
     btnDownloadAudio.classList.add('btn-download-ready');
     if (btnDownloadText) btnDownloadText.textContent = 'Descargar MP3';
     btnDownloadAudio.title = `Descargar archivo MP3 ligero (${total} frases generadas)`;
-  } else if (info.isPlaying) {
+  } else if (info.isPlaying || isBgConverting) {
     btnDownloadAudio.disabled = true;
     btnDownloadAudio.classList.remove('btn-download-ready');
     if (btnDownloadText) btnDownloadText.textContent = `MP3 (${pct}%)`;
@@ -565,8 +591,9 @@ async function resumePlayback() {
 }
 
 async function stopPlayback(reset = false) {
+  activeChunkIndex = 0;
   await chrome.runtime.sendMessage({ type: MESSAGE_TYPES.STOP_PLAYBACK, reset }).catch(() => {});
-  updatePlayPauseUI(false, false);
+  updatePlayPauseUI(false, false, !reset && !isConversionComplete);
 }
 
 function resetConversionState({ clearStorage = false } = {}) {
@@ -1117,7 +1144,7 @@ function setupEventListeners() {
       }
 
       case MESSAGE_TYPES.PLAYBACK_STATE: {
-        if (message.isPlaying) {
+        if (message.isPlaying || message.isConverting) {
           modelProgressCard.classList.add('hidden');
         }
         if (message.chunks) {
@@ -1129,7 +1156,7 @@ function setupEventListeners() {
         if (typeof message.isConversionComplete === 'boolean') {
           isConversionComplete = message.isConversionComplete;
         }
-        updatePlayPauseUI(message.isPlaying, message.isPaused);
+        updatePlayPauseUI(message.isPlaying, message.isPaused, message.isConverting);
         updateConversionUI(message);
         break;
       }

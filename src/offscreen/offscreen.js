@@ -5,8 +5,8 @@
 
 import { KokoroTTS, TextSplitterStream, env } from '../libs/kokoro.web.js';
 import { MESSAGE_TYPES, DEFAULT_MODEL_ID, DEFAULT_SETTINGS } from '../shared/constants.js';
-import { encodeWAV, encodeMP3, ProgressiveMp3Encoder, normalizeTextForSpeech, splitTextIntoSmartChunks, SmartTextSplitter, trimAudioSilence } from '../shared/audio-utils.js';
-import { saveAudioBlob, getAudioBlob } from '../shared/audio-storage.js';
+import { encodeWAV, encodeMP3, ProgressiveMp3Encoder, normalizeTextForSpeech, splitTextIntoSmartChunks, SmartTextSplitter, trimAudioSilence, float32ToInt16, int16ToFloat32 } from '../shared/audio-utils.js';
+import { saveAudioBlob, getAudioBlob, saveSpilledPcmChunk, getSpilledPcmChunk, deleteSpilledPcmChunk, clearSpilledPcmChunks } from '../shared/audio-storage.js';
 
 // Configure local WASM paths for ONNX Runtime Web using static extension origin
 if (env) {
@@ -28,7 +28,9 @@ let activeSources = [];
 let nextStartTime = 0;
 let pendingAudioQueue = [];
 const LOOKAHEAD_BUFFER_SEC = 45; // Max scheduled lookahead audio in Web Audio API (~2-3 chunks)
-const MAX_PENDING_QUEUE_CHUNKS = 8; // Backpressure limit to prevent memory bloat (~3-4 min of audio)
+const MAX_RAM_QUEUE_CHUNKS = 64; // Max unplayed Int16 PCM chunks kept in JS RAM (~20 min of audio, ~30 MB)
+const HYDRATE_RAM_THRESHOLD = 32; // Prefetch spilled chunks from IndexedDB when in-RAM queue drops below this
+let isHydratingQueue = false;
 let progressiveMp3Encoder = null;
 let currentVoice = DEFAULT_SETTINGS.selectedVoice;
 let currentSpeed = DEFAULT_SETTINGS.speed;
@@ -202,24 +204,87 @@ function disconnectActiveSources() {
   activeSources = [];
 }
 
+function countInRamQueueChunks() {
+  let count = 0;
+  for (let i = 0; i < pendingAudioQueue.length; i++) {
+    if (pendingAudioQueue[i].pcm) count++;
+  }
+  return count;
+}
+
+function hasSpilledQueueChunks() {
+  for (let i = 0; i < pendingAudioQueue.length; i++) {
+    if (!pendingAudioQueue[i].pcm && pendingAudioQueue[i].spilledKey) return true;
+  }
+  return false;
+}
+
+function cachePlayedChunkInRam(item) {
+  if (!item || !item.pcm) return;
+  pcmChunkCache.set(item.chunkIndex, {
+    pcm: item.pcm,
+    spilledKey: null,
+    chunkIndex: item.chunkIndex,
+    text: item.text,
+    isParagraphEnd: item.isParagraphEnd,
+    sampleRate: item.sampleRate || 24000
+  });
+  while (pcmChunkCache.size > MAX_PCM_CACHE_CHUNKS) {
+    const oldestKey = pcmChunkCache.keys().next().value;
+    pcmChunkCache.delete(oldestKey);
+  }
+}
+
+async function hydratePendingQueueFromSwap(sessionId = activeSessionId, batchSize = 16) {
+  if (isHydratingQueue) return;
+  isHydratingQueue = true;
+  try {
+    let hydrated = 0;
+    for (let i = 0; i < pendingAudioQueue.length && hydrated < batchSize; i++) {
+      if (activeSessionId !== sessionId || !isPlaying) break;
+      const item = pendingAudioQueue[i];
+      if (!item.pcm && item.spilledKey) {
+        const key = item.spilledKey;
+        const pcm = await getSpilledPcmChunk(key);
+        if (pcm && activeSessionId === sessionId) {
+          item.pcm = pcm;
+          item.spilledKey = null;
+          deleteSpilledPcmChunk(key).catch(() => {});
+          hydrated++;
+        }
+      }
+    }
+    if (hydrated > 0 && isPlaying && !isPaused && activeSessionId === sessionId) {
+      schedulePendingAudioChunks();
+    }
+  } finally {
+    isHydratingQueue = false;
+  }
+}
+
 // 4. Playback Controls
-function stopAudioPlayback(resetConversion = false) {
-  abortGeneration = true;
+function stopAudioPlayback(resetConversion = false, keepBackgroundConversion = false) {
+  if (!keepBackgroundConversion) {
+    abortGeneration = true;
+    isGenerationDone = false;
+    if (activeSplitter) {
+      activeSplitter.abort();
+    }
+    progressiveMp3Encoder = null;
+  }
   isPlaying = false;
   isPaused = false;
-  isGenerationDone = false;
-  if (activeSplitter) {
-    activeSplitter.abort();
-  }
   pendingAudioQueue = [];
-  progressiveMp3Encoder = null;
   nextStartTime = 0;
-  totalScheduledChunks = 0;
+  if (!keepBackgroundConversion) {
+    totalScheduledChunks = 0;
+  }
   completedChunks = 0;
   currentActiveChunkIndex = -1;
   scheduledChunks = [];
   stopPlaybackMonitor();
   disconnectActiveSources();
+  clearSpilledPcmChunks().catch(() => {});
 
   if (resetConversion) {
     isConversionComplete = false;
@@ -236,13 +301,22 @@ function stopAudioPlayback(resetConversion = false) {
     audioCtx.resume().catch(() => {});
   }
 
+  const conversionPct = isConversionComplete
+    ? 100
+    : (keepBackgroundConversion && totalExpectedChunks > 0
+        ? Math.min(100, Math.round((convertedChunks / totalExpectedChunks) * 100))
+        : 0);
+
   chrome.runtime.sendMessage({
     type: MESSAGE_TYPES.PLAYBACK_STATE,
     isPlaying: false,
     isPaused: false,
+    isConverting: Boolean(keepBackgroundConversion && !isConversionComplete),
     chunkIndex: -1,
+    convertedChunks: convertedChunks,
+    totalExpectedChunks: totalExpectedChunks,
     isConversionComplete: isConversionComplete,
-    conversionProgress: isConversionComplete ? 100 : 0
+    conversionProgress: conversionPct
   }).catch(() => {});
 }
 
@@ -253,35 +327,61 @@ async function seekToChunk(targetIndex, options = {}) {
   const clampedIndex = Math.max(0, Math.min(targetIndex, Math.max(0, total - 1)));
   const forceResynth = Boolean(options.forceResynthesize);
 
-  // Fast Path: Check if targetIndex..endOfGeneratedWindow is completely in pcmChunkCache
+  // Fast In-Place Queue Seek: If targetIndex has already been synthesized in the current session,
+  // reposition pendingAudioQueue using pcmChunkCache + pendingAudioQueue WITHOUT aborting the 10x background MP3 generator!
   if (!forceResynth && total > 0) {
     const endBound = isGenerationDone ? total : nextGeneratorChunkIndex;
-    if (clampedIndex < endBound && endBound > clampedIndex) {
-      let allCached = true;
-      for (let k = clampedIndex; k < endBound; k++) {
-        if (!pcmChunkCache.has(k)) {
-          allCached = false;
-          break;
+    if (clampedIndex < endBound) {
+      const firstPendingIdx = pendingAudioQueue.length > 0 ? pendingAudioQueue[0].chunkIndex : endBound;
+      let canSeekInPlace = false;
+
+      if (clampedIndex < firstPendingIdx) {
+        // Backward or within currently-scheduled Web Audio window: verify clampedIndex..firstPendingIdx-1 are in pcmChunkCache
+        let allInCache = true;
+        for (let k = clampedIndex; k < firstPendingIdx; k++) {
+          if (!pcmChunkCache.has(k)) {
+            allInCache = false;
+            break;
+          }
         }
+        if (allInCache) {
+          const toPrepend = [];
+          for (let k = clampedIndex; k < firstPendingIdx; k++) {
+            toPrepend.push({ ...pcmChunkCache.get(k) });
+          }
+          pendingAudioQueue.unshift(...toPrepend);
+          canSeekInPlace = true;
+        }
+      } else {
+        // Forward into pendingAudioQueue (clampedIndex >= firstPendingIdx && clampedIndex < endBound)
+        while (pendingAudioQueue.length > 0 && pendingAudioQueue[0].chunkIndex < clampedIndex) {
+          const skipped = pendingAudioQueue.shift();
+          if (skipped.pcm) {
+            cachePlayedChunkInRam(skipped);
+          } else if (skipped.spilledKey) {
+            deleteSpilledPcmChunk(skipped.spilledKey).catch(() => {});
+          }
+        }
+        canSeekInPlace = pendingAudioQueue.length > 0 && pendingAudioQueue[0].chunkIndex === clampedIndex;
       }
 
-      if (allCached) {
+      if (canSeekInPlace) {
         const ctx = getAudioContext();
         if (ctx.state === 'suspended') {
           await ctx.resume().catch(() => {});
         }
         disconnectActiveSources();
         scheduledChunks = [];
-        pendingAudioQueue = [];
-        for (let k = clampedIndex; k < endBound; k++) {
-          pendingAudioQueue.push(pcmChunkCache.get(k));
-        }
         nextStartTime = ctx.currentTime + 0.03;
         currentActiveChunkIndex = -1;
         isPlaying = true;
         isPaused = false;
         completedChunks = clampedIndex;
-        totalScheduledChunks = endBound;
+
+        // If the target chunk at the front of the queue was spilled to IndexedDB, hydrate the front batch immediately
+        if (pendingAudioQueue[0] && !pendingAudioQueue[0].pcm && pendingAudioQueue[0].spilledKey) {
+          await hydratePendingQueueFromSwap(activeSessionId, 8);
+        }
 
         schedulePendingAudioChunks();
 
@@ -289,6 +389,7 @@ async function seekToChunk(targetIndex, options = {}) {
           type: MESSAGE_TYPES.PLAYBACK_STATE,
           isPlaying: true,
           isPaused: false,
+          isConverting: Boolean(activeGenerationPromise && !isConversionComplete),
           chunkIndex: clampedIndex,
           isConversionComplete: isConversionComplete,
           totalExpectedChunks: totalExpectedChunks,
@@ -340,7 +441,17 @@ async function playText(text, options = {}) {
   }
 
   const startChunkIndex = Math.max(0, options.startChunkIndex || 0);
-  const preserveConversion = Boolean(options.preserveConversionComplete && isConversionComplete);
+  const voiceChanged = options.voice && options.voice !== currentVoice;
+  const speedChanged = options.speed && options.speed !== currentSpeed;
+  const sameCompletedBook = Boolean(
+    isConversionComplete &&
+    text &&
+    text === currentSourceText &&
+    !voiceChanged &&
+    !speedChanged &&
+    !options.clearCache
+  );
+  const preserveConversion = Boolean((options.preserveConversionComplete && isConversionComplete) || sameCompletedBook);
   const savedConversionComplete = preserveConversion;
 
   // Pre-split text using smart sentence- and paragraph-aware chunking (or reuse on seek)
@@ -352,7 +463,7 @@ async function playText(text, options = {}) {
         maxChunkLimit: 450
       });
 
-  stopAudioPlayback();
+  stopAudioPlayback(false, false);
   abortGeneration = false;
   isGenerationDone = false;
   isConversionComplete = savedConversionComplete;
@@ -360,8 +471,6 @@ async function playText(text, options = {}) {
 
   currentSourceText = text || currentSourceText;
   if (options.title !== undefined) currentTitle = options.title;
-  const voiceChanged = options.voice && options.voice !== currentVoice;
-  const speedChanged = options.speed && options.speed !== currentSpeed;
   if (startChunkIndex === 0 || options.clearCache || voiceChanged || speedChanged) {
     pcmChunkCache.clear();
   }
@@ -408,6 +517,7 @@ async function playText(text, options = {}) {
     type: MESSAGE_TYPES.PLAYBACK_STATE,
     isPlaying: true,
     isPaused: false,
+    isConverting: !savedConversionComplete,
     chunkIndex: startChunkIndex,
     conversionProgress: initialPct,
     convertedChunks: convertedChunks,
@@ -424,7 +534,7 @@ async function playText(text, options = {}) {
       let localIndex = 0;
       const chunkTexts = [];
 
-      // Stream chunks continuously with KokoroTTS using the pre-split stream
+      // Stream chunks continuously at full ~10x WebGPU speed using the pre-split stream
       for await (const chunk of model.stream(splitter, { voice: currentVoice, speed: currentSpeed })) {
         if (abortGeneration || activeSessionId !== sessionId) break;
 
@@ -437,13 +547,65 @@ async function playText(text, options = {}) {
         localIndex++;
         nextGeneratorChunkIndex = globalChunkIndex + 1;
 
-        // Trim excessive silence padding from neural vocoder output for seamless streaming
-        const cleanPcm = trimAudioSilence(rawPcm, chunk.audio.sampling_rate || 24000, 20, 40);
+        const sampleRate = chunk.audio.sampling_rate || 24000;
+        const isParagraphEnd = splitter.chunkMetadata[localIndex - 1]?.isParagraphEnd ?? false;
 
-        // Feed directly into incremental MP3 encoder (low memory, instant readiness)
+        // 1. Trim excessive silence padding from neural vocoder output for seamless streaming
+        const cleanPcm = trimAudioSilence(rawPcm, sampleRate, 20, 40);
+        // Convert once to compact 16-bit PCM (cuts RAM footprint by 50% and accelerates MP3 encoding)
+        const int16Pcm = float32ToInt16(cleanPcm);
+
+        totalScheduledChunks++;
+
+        // 2. PRIORITY #1: Enqueue and schedule into Web Audio API IMMEDIATELY if streaming is active
+        if (isPlaying) {
+          const inRamCount = countInRamQueueChunks();
+          let queueItem;
+          if (!hasSpilledQueueChunks() && inRamCount < MAX_RAM_QUEUE_CHUNKS) {
+            queueItem = {
+              pcm: int16Pcm,
+              spilledKey: null,
+              chunkIndex: globalChunkIndex,
+              text: chunk.text,
+              isParagraphEnd,
+              sampleRate
+            };
+          } else {
+            // Spill overflow chunks (>64 sentences ahead) to IndexedDB swap so JS RAM stays flat (~30MB)
+            const swapKey = `swap_${sessionId}_${globalChunkIndex}`;
+            const saved = await saveSpilledPcmChunk(swapKey, int16Pcm);
+            queueItem = {
+              pcm: saved ? null : int16Pcm,
+              spilledKey: saved ? swapKey : null,
+              chunkIndex: globalChunkIndex,
+              text: chunk.text,
+              isParagraphEnd,
+              sampleRate
+            };
+          }
+
+          pendingAudioQueue.push(queueItem);
+
+          // Seed initial chunks into pcmChunkCache for instant backward seeking right from the start
+          if (pcmChunkCache.size < MAX_PCM_CACHE_CHUNKS && queueItem.pcm) {
+            pcmChunkCache.set(globalChunkIndex, { ...queueItem });
+          }
+
+          // Schedule into Web Audio API if lookahead buffer (<45s) needs filling
+          schedulePendingAudioChunks();
+        }
+
+        // 3. Yield briefly to macrotask queue once Web Audio lookahead is buffered,
+        // guaranteeing 0ms latency for the 40ms karaoke monitor and user controls before MP3 encoding
+        if (!isPlaying || isPaused || activeSources.length >= 2) {
+          await new Promise(r => setTimeout(r, 12));
+          if (abortGeneration || activeSessionId !== sessionId) break;
+        }
+
+        // 4. Feed compact Int16 PCM directly into incremental MP3 encoder
         if (progressiveMp3Encoder) {
           try {
-            progressiveMp3Encoder.feed(cleanPcm);
+            progressiveMp3Encoder.feed(int16Pcm);
           } catch (encErr) {
             console.warn('Error en codificador progresivo MP3:', encErr);
           }
@@ -452,7 +614,6 @@ async function playText(text, options = {}) {
         chunkTexts.push(chunk.text);
         currentChunkTexts = chunkTexts;
 
-        totalScheduledChunks++;
         if (!savedConversionComplete) {
           convertedChunks = globalChunkIndex + 1;
         }
@@ -468,6 +629,7 @@ async function playText(text, options = {}) {
           type: MESSAGE_TYPES.PLAYBACK_STATE,
           isPlaying: isPlaying,
           isPaused: isPaused,
+          isConverting: !savedConversionComplete,
           totalChunks: totalScheduledChunks,
           ...(localIndex === 1 ? { chunks: currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts } : {}),
           conversionProgress: conversionPct,
@@ -476,33 +638,13 @@ async function playText(text, options = {}) {
           isConversionComplete: isConversionComplete
         }).catch(() => {});
 
-        const isParagraphEnd = splitter.chunkMetadata[localIndex - 1]?.isParagraphEnd ?? false;
-
-        const queueItem = {
-          pcm: cleanPcm,
-          chunkIndex: globalChunkIndex,
-          text: chunk.text,
-          isParagraphEnd,
-          sampleRate: chunk.audio.sampling_rate || 24000
-        };
-
-        // Store in bounded sliding PCM cache for 0ms Prev/Next seeking
-        pcmChunkCache.set(globalChunkIndex, queueItem);
-        if (pcmChunkCache.size > MAX_PCM_CACHE_CHUNKS) {
-          const oldestKey = pcmChunkCache.keys().next().value;
-          pcmChunkCache.delete(oldestKey);
+        // If user stopped streaming AND there is no background MP3 conversion to finish, exit loop
+        if (!isPlaying && !progressiveMp3Encoder) {
+          break;
         }
 
-        // Enqueue chunk in pendingAudioQueue for just-in-time Web Audio allocation
-        pendingAudioQueue.push(queueItem);
-
-        // Schedule into Web Audio API if lookahead buffer needs filling
-        schedulePendingAudioChunks();
-
-        // Backpressure: If queue is already ahead by several minutes, pause generator to keep memory flat
-        while (pendingAudioQueue.length >= MAX_PENDING_QUEUE_CHUNKS && !abortGeneration && activeSessionId === sessionId) {
-          await new Promise(r => setTimeout(r, isPaused ? 300 : 150));
-        }
+        // Macrotask yield between chunks to keep karaoke and audio callbacks 100% responsive
+        await new Promise(r => setTimeout(r, 10));
       }
 
       if (!abortGeneration && activeSessionId === sessionId) {
@@ -572,8 +714,8 @@ async function playText(text, options = {}) {
           type: MESSAGE_TYPES.PLAYBACK_STATE,
           isPlaying: isPlaying,
           isPaused: isPaused,
+          isConverting: false,
           totalChunks: totalExpectedChunks,
-          chunks: currentSmartChunks.length > 0 ? currentSmartChunks : chunkTexts,
           conversionProgress: isConversionComplete ? 100 : Math.round((convertedChunks / (totalExpectedChunks || 1)) * 100),
           convertedChunks: isConversionComplete ? totalExpectedChunks : convertedChunks,
           totalExpectedChunks: totalExpectedChunks,
@@ -581,13 +723,15 @@ async function playText(text, options = {}) {
         }).catch(() => {});
       }
 
-      // If all audio already finished playing before generation loop concluded
-      if (completedChunks >= totalScheduledChunks && activeSources.length === 0 && pendingAudioQueue.length === 0) {
+      // If all audio already finished playing before generation loop concluded (and not paused)
+      if (isPlaying && !isPaused && completedChunks >= totalScheduledChunks && activeSources.length === 0 && pendingAudioQueue.length === 0) {
         isPlaying = false;
+        clearSpilledPcmChunks().catch(() => {});
         chrome.runtime.sendMessage({
           type: MESSAGE_TYPES.PLAYBACK_STATE,
           isPlaying: false,
           isPaused: false,
+          isConverting: false,
           finished: true,
           isConversionComplete: isConversionComplete
         }).catch(() => {});
@@ -595,7 +739,7 @@ async function playText(text, options = {}) {
     } catch (err) {
       if (activeSessionId === sessionId) {
         console.error('Synthesis error during streaming:', err);
-        stopAudioPlayback();
+        stopAudioPlayback(false, false);
         chrome.runtime.sendMessage({
           type: MESSAGE_TYPES.MODEL_ERROR,
           error: `Error durante la síntesis: ${err.message}`
@@ -671,13 +815,28 @@ function schedulePendingAudioChunks() {
       break;
     }
 
-    const item = pendingAudioQueue.shift();
-    if (!item) break;
+    // If the front chunk was spilled to IndexedDB and not yet hydrated in RAM, trigger hydration and wait
+    if (!pendingAudioQueue[0].pcm && pendingAudioQueue[0].spilledKey) {
+      hydratePendingQueueFromSwap(activeSessionId, 16);
+      break;
+    }
 
-    const audioBuffer = safeCreateAudioBuffer(ctx, 1, item.pcm.length, item.sampleRate || 24000);
-    audioBuffer.copyToChannel(item.pcm, 0);
+    const item = pendingAudioQueue.shift();
+    if (!item || !item.pcm) break;
+
+    // Cache recently scheduled chunk in sliding RAM cache for 0ms Prev/Next seeking
+    cachePlayedChunkInRam(item);
+
+    const float32Pcm = int16ToFloat32(item.pcm);
+    const audioBuffer = safeCreateAudioBuffer(ctx, 1, float32Pcm.length, item.sampleRate || 24000);
+    audioBuffer.copyToChannel(float32Pcm, 0);
 
     scheduleChunkPlayback(audioBuffer, item.chunkIndex, item.text, item.isParagraphEnd);
+  }
+
+  // Proactively prefetch spilled chunks from IndexedDB when in-RAM queue drops below threshold (32 chunks ~10 min)
+  if (countInRamQueueChunks() < HYDRATE_RAM_THRESHOLD) {
+    hydratePendingQueueFromSwap(activeSessionId, 16);
   }
 }
 
@@ -777,14 +936,16 @@ function scheduleChunkPlayback(audioBuffer, chunkIndex, text, isParagraphEnd = f
     // Keep filling audio lookahead buffer from the queue as chunks finish playing
     schedulePendingAudioChunks();
 
-    if (isGenerationDone && pendingAudioQueue.length === 0 && completedChunks >= totalScheduledChunks && activeSources.length === 0) {
+    if (isGenerationDone && pendingAudioQueue.length === 0 && activeSources.length === 0) {
       isPlaying = false;
       isPaused = false;
       stopPlaybackMonitor();
+      clearSpilledPcmChunks().catch(() => {});
       chrome.runtime.sendMessage({
         type: MESSAGE_TYPES.PLAYBACK_STATE,
         isPlaying: false,
         isPaused: false,
+        isConverting: false,
         finished: true,
         isConversionComplete: true
       }).catch(() => {});
@@ -825,9 +986,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const conversionPct = totalExpectedChunks > 0 
           ? Math.min(100, Math.round((convertedChunks / totalExpectedChunks) * 100)) 
           : (isConversionComplete ? 100 : 0);
+        const isConverting = Boolean(activeGenerationPromise && !isConversionComplete);
         sendResponse({
           isPlaying: isPlaying,
           isPaused: isPaused,
+          isConverting: isConverting,
           totalChunks: totalScheduledChunks,
           chunks: currentSmartChunks.length > 0 ? currentSmartChunks : currentChunkTexts,
           chunkIndex: currentActiveChunkIndex,
@@ -862,7 +1025,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case "RESET_STATE": {
-        stopAudioPlayback(true);
+        stopAudioPlayback(true, false);
         sendResponse({ success: true });
         break;
       }
@@ -903,6 +1066,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           type: MESSAGE_TYPES.PLAYBACK_STATE,
           isPlaying: isPlaying,
           isPaused: true,
+          isConverting: Boolean(activeGenerationPromise && !isConversionComplete),
           isConversionComplete: isConversionComplete,
           totalExpectedChunks: totalExpectedChunks,
           convertedChunks: convertedChunks,
@@ -922,6 +1086,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           type: MESSAGE_TYPES.PLAYBACK_STATE,
           isPlaying: isPlaying,
           isPaused: false,
+          isConverting: Boolean(activeGenerationPromise && !isConversionComplete),
           isConversionComplete: isConversionComplete,
           totalExpectedChunks: totalExpectedChunks,
           convertedChunks: convertedChunks,
@@ -932,7 +1097,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case MESSAGE_TYPES.STOP_PLAYBACK: {
-        stopAudioPlayback(Boolean(message.reset));
+        const shouldReset = Boolean(message.reset);
+        const keepBackgroundConversion = !shouldReset && Boolean(activeGenerationPromise && progressiveMp3Encoder && !isConversionComplete);
+        stopAudioPlayback(shouldReset, keepBackgroundConversion);
         sendResponse({ success: true });
         break;
       }

@@ -10,9 +10,11 @@ import {
   normalizeTextForSpeech, 
   splitTextIntoSmartChunks, 
   SmartTextSplitter, 
-  trimAudioSilence 
+  trimAudioSilence,
+  float32ToInt16,
+  int16ToFloat32
 } from '../src/shared/audio-utils.js';
-import { saveAudioBlob, getAudioBlob, clearAudioBlobs } from '../src/shared/audio-storage.js';
+import { saveAudioBlob, getAudioBlob, clearAudioBlobs, saveSpilledPcmChunk, getSpilledPcmChunk, deleteSpilledPcmChunk, clearSpilledPcmChunks } from '../src/shared/audio-storage.js';
 import { extractTextFromPDF } from '../src/shared/pdf-extractor.js';
 
 // Configure local WASM paths for ONNX Runtime Web (must be absolute URL for dynamic import())
@@ -72,7 +74,9 @@ let activeSources = [];
 let nextStartTime = 0;
 let pendingAudioQueue = [];
 const LOOKAHEAD_BUFFER_SEC = 45; // Max scheduled lookahead audio in Web Audio API (~2-3 chunks)
-const MAX_PENDING_QUEUE_CHUNKS = 8; // Backpressure limit to prevent memory bloat (~3-4 min of audio)
+const MAX_RAM_QUEUE_CHUNKS = 64; // Max unplayed Int16 PCM chunks kept in JS RAM (~20 min of audio, ~30 MB)
+const HYDRATE_RAM_THRESHOLD = 32; // Prefetch spilled chunks from IndexedDB when in-RAM queue drops below this
+let isHydratingQueue = false;
 let progressiveMp3Encoder = null;
 let currentVoice = DEFAULT_SETTINGS.selectedVoice;
 let currentSpeed = DEFAULT_SETTINGS.speed;
@@ -400,8 +404,11 @@ async function initKokoroEngine(preferredDevice = currentDevice) {
 }
 
 // --- 3. Playback Lifecycle & Streaming ---
-function stopAudioPlayback() {
-  abortGeneration = true;
+function stopAudioPlayback(fullAbort = true) {
+  if (fullAbort) {
+    abortGeneration = true;
+    clearSpilledPcmChunks().catch(() => {});
+  }
   isPlaying = false;
   isPaused = false;
   pendingAudioQueue = [];
@@ -424,6 +431,54 @@ function stopAudioPlayback() {
   updatePlayPauseUI(false, false);
 }
 
+let isHydratingSwap = false;
+async function hydratePendingQueueFromSwap(sessionId) {
+  if (isHydratingSwap || abortGeneration || sessionId !== activeSessionId) return;
+  let inRamCount = 0;
+  let firstSpilledItem = null;
+  for (let i = 0; i < pendingAudioQueue.length; i++) {
+    if (pendingAudioQueue[i].pcm) {
+      inRamCount++;
+    } else if (!firstSpilledItem) {
+      firstSpilledItem = pendingAudioQueue[i];
+    }
+  }
+  if (!firstSpilledItem || inRamCount >= HYDRATE_RAM_THRESHOLD) return;
+
+  isHydratingSwap = true;
+  try {
+    while (!abortGeneration && sessionId === activeSessionId) {
+      let currentRamCount = 0;
+      let targetItem = null;
+      for (let i = 0; i < pendingAudioQueue.length; i++) {
+        if (pendingAudioQueue[i].pcm) {
+          currentRamCount++;
+        } else if (!targetItem && pendingAudioQueue[i].spilledKey) {
+          targetItem = pendingAudioQueue[i];
+        }
+      }
+      if (!targetItem || currentRamCount >= MAX_RAM_QUEUE_CHUNKS) break;
+
+      const key = targetItem.spilledKey;
+      const pcmInt16 = await getSpilledPcmChunk(key);
+      if (abortGeneration || sessionId !== activeSessionId) break;
+      if (pcmInt16) {
+        targetItem.pcm = pcmInt16;
+        targetItem.spilled = false;
+        targetItem.spilledKey = null;
+        deleteSpilledPcmChunk(key).catch(() => {});
+      } else {
+        break;
+      }
+      if (isPlaying && !isPaused) {
+        schedulePendingAudioChunks();
+      }
+    }
+  } finally {
+    isHydratingSwap = false;
+  }
+}
+
 async function startPlayback() {
   let rawText = (currentFullDocumentText || '').trim();
   if (!rawText || (textInput.value.trim() && !textInput.value.includes('[DOCUMENTO COMPLETO CARGADO EN MEMORIA]'))) {
@@ -437,7 +492,7 @@ async function startPlayback() {
   }
 
   const text = normalizeTextForSpeech(rawText);
-  stopAudioPlayback();
+  stopAudioPlayback(true);
   abortGeneration = false;
   isConversionComplete = false;
   const sessionId = ++activeSessionId;
@@ -489,23 +544,70 @@ async function startPlayback() {
       if (!rawPcm || rawPcm.length === 0) continue;
 
       const cleanPcm = trimAudioSilence(rawPcm, chunk.audio.sampling_rate || 24000, 20, 40);
+      const compactPcm = float32ToInt16(cleanPcm);
 
-      // Feed MP3 encoder
-      if (progressiveMp3Encoder) {
-        try {
-          progressiveMp3Encoder.feed(cleanPcm);
-        } catch (encErr) {
-          console.warn('Error en codificador MP3:', encErr);
-        }
-      }
+      const currentIdx = chunkIndex++;
+      const isParagraphEnd = splitter.chunkMetadata[currentIdx]?.isParagraphEnd ?? false;
+      const sampleRate = chunk.audio.sampling_rate || 24000;
 
       chunkTexts.push(chunk.text);
       currentChunks = chunkTexts;
       convertedChunks++;
 
+      // Queue chunk for Web Audio streaming if still playing or paused
+      if (isPlaying || isPaused) {
+        let inRamCount = 0;
+        let hasSpilled = false;
+        for (let i = 0; i < pendingAudioQueue.length; i++) {
+          if (pendingAudioQueue[i].pcm) inRamCount++;
+          else if (pendingAudioQueue[i].spilledKey) hasSpilled = true;
+        }
+
+        if (!hasSpilled && inRamCount < MAX_RAM_QUEUE_CHUNKS) {
+          pendingAudioQueue.push({
+            pcm: compactPcm,
+            spilled: false,
+            spilledKey: null,
+            chunkIndex: currentIdx,
+            text: chunk.text,
+            isParagraphEnd,
+            sampleRate
+          });
+        } else {
+          const swapKey = `swap_${sessionId}_${currentIdx}`;
+          const saved = await saveSpilledPcmChunk(swapKey, compactPcm);
+          if (abortGeneration || activeSessionId !== sessionId) break;
+          pendingAudioQueue.push({
+            pcm: saved ? null : compactPcm,
+            spilled: Boolean(saved),
+            spilledKey: saved ? swapKey : null,
+            chunkIndex: currentIdx,
+            text: chunk.text,
+            isParagraphEnd,
+            sampleRate
+          });
+        }
+
+        // Priority 1: Schedule into Web Audio API if lookahead buffer needs filling
+        schedulePendingAudioChunks();
+      }
+
+      // Yield briefly before MP3 encoding so audio timers & UI stay 100% responsive
+      await new Promise(r => setTimeout(r, 8));
+      if (abortGeneration || activeSessionId !== sessionId) break;
+
+      // Feed MP3 encoder directly with compact Int16Array
+      if (progressiveMp3Encoder) {
+        try {
+          progressiveMp3Encoder.feed(compactPcm);
+        } catch (encErr) {
+          console.warn('Error en codificador MP3:', encErr);
+        }
+      }
+
       const pct = Math.min(100, Math.round((convertedChunks / totalExpectedChunks) * 100));
       updateConversionUI({
-        isPlaying: true,
+        isPlaying: isPlaying,
         conversionProgress: pct,
         convertedChunks: convertedChunks,
         totalExpectedChunks: totalExpectedChunks,
@@ -514,24 +616,7 @@ async function startPlayback() {
 
       renderKaraokeChunks(chunkTexts);
 
-      const isParagraphEnd = splitter.chunkMetadata[chunkIndex]?.isParagraphEnd ?? false;
-
-      // Queue chunk for just-in-time Web Audio allocation
-      pendingAudioQueue.push({
-        pcm: cleanPcm,
-        chunkIndex: chunkIndex++,
-        text: chunk.text,
-        isParagraphEnd,
-        sampleRate: chunk.audio.sampling_rate || 24000
-      });
-
-      // Schedule into Web Audio API if lookahead buffer needs filling
-      schedulePendingAudioChunks();
-
-      // Backpressure: If queue is already ahead by several minutes, pause generator to keep memory flat
-      while (pendingAudioQueue.length >= MAX_PENDING_QUEUE_CHUNKS && !abortGeneration && activeSessionId === sessionId) {
-        await new Promise(r => setTimeout(r, isPaused ? 300 : 150));
-      }
+      await new Promise(r => setTimeout(r, 8));
     }
 
     if (!abortGeneration && activeSessionId === sessionId) {
@@ -581,7 +666,7 @@ async function startPlayback() {
     }
   } catch (err) {
     console.error('Synthesis error:', err);
-    stopAudioPlayback();
+    stopAudioPlayback(true);
   }
 }
 
@@ -638,13 +723,30 @@ function schedulePendingAudioChunks() {
       break;
     }
 
+    const nextItem = pendingAudioQueue[0];
+    if (!nextItem || !nextItem.pcm) {
+      hydratePendingQueueFromSwap(activeSessionId);
+      break;
+    }
+
     const item = pendingAudioQueue.shift();
     if (!item) break;
 
-    const audioBuffer = safeCreateAudioBuffer(ctx, 1, item.pcm.length, item.sampleRate || 24000);
-    audioBuffer.copyToChannel(item.pcm, 0);
+    const floatPcm = item.pcm instanceof Float32Array ? item.pcm : int16ToFloat32(item.pcm);
+    const audioBuffer = safeCreateAudioBuffer(ctx, 1, floatPcm.length, item.sampleRate || 24000);
+    audioBuffer.copyToChannel(floatPcm, 0);
 
     scheduleChunkPlayback(audioBuffer, item.chunkIndex, item.text, item.isParagraphEnd);
+  }
+
+  let inRamCount = 0;
+  let hasSpilled = false;
+  for (let i = 0; i < pendingAudioQueue.length; i++) {
+    if (pendingAudioQueue[i].pcm) inRamCount++;
+    else if (pendingAudioQueue[i].spilled) hasSpilled = true;
+  }
+  if (hasSpilled && inRamCount < HYDRATE_RAM_THRESHOLD) {
+    hydratePendingQueueFromSwap(activeSessionId);
   }
 }
 

@@ -248,6 +248,42 @@ export function trimAudioSilence(pcm, sampleRate = 24000, maxLeadMs = 20, maxTra
 }
 
 /**
+ * Converts a Float32Array [-1.0, 1.0] into a compact 16-bit signed PCM Int16Array.
+ * Cuts RAM usage by 50% (2 bytes/sample instead of 4 bytes/sample) with CD-grade 16-bit fidelity.
+ * @param {Float32Array|Int16Array} float32Array
+ * @returns {Int16Array}
+ */
+export function float32ToInt16(float32Array) {
+  if (!float32Array) return new Int16Array(0);
+  if (float32Array instanceof Int16Array) return float32Array;
+  const len = float32Array.length;
+  const int16 = new Int16Array(len);
+  for (let i = 0; i < len; i++) {
+    const s = Math.max(-1, Math.min(1, float32Array[i]));
+    int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return int16;
+}
+
+/**
+ * Converts a 16-bit signed PCM Int16Array back into a Float32Array [-1.0, 1.0]
+ * for just-in-time Web Audio API AudioBuffer scheduling.
+ * @param {Int16Array|Float32Array} pcmArray
+ * @returns {Float32Array}
+ */
+export function int16ToFloat32(pcmArray) {
+  if (!pcmArray) return new Float32Array(0);
+  if (pcmArray instanceof Float32Array) return pcmArray;
+  const len = pcmArray.length;
+  const float32 = new Float32Array(len);
+  for (let i = 0; i < len; i++) {
+    const s = pcmArray[i];
+    float32[i] = s < 0 ? s / 0x8000 : s / 0x7FFF;
+  }
+  return float32;
+}
+
+/**
  * Encodes Float32Array PCM audio chunks into a valid 16-bit Mono WAV Blob.
  * Default sample rate for Kokoro is 24000 Hz.
  * Streams samples directly into the DataView buffer to avoid intermediate Float32Array allocation.
@@ -326,23 +362,29 @@ export class ProgressiveMp3Encoder {
   }
 
   /**
-   * Feeds a Float32Array PCM chunk to the MP3 encoder.
-   * Converts in small slices (11,520 samples, ~23KB) to eliminate large memory allocations.
-   * @param {Float32Array} float32Array
+   * Feeds a Float32Array or Int16Array PCM chunk to the MP3 encoder.
+   * Processes in small slices (11,520 samples, ~23KB) to eliminate large memory allocations.
+   * @param {Float32Array|Int16Array} pcmArray
    */
-  feed(float32Array) {
-    if (!float32Array || float32Array.length === 0 || this.isFlushed) return;
+  feed(pcmArray) {
+    if (!pcmArray || pcmArray.length === 0 || this.isFlushed) return;
 
-    const len = float32Array.length;
+    const len = pcmArray.length;
     this.totalSamples += len;
+    const isInt16 = pcmArray instanceof Int16Array;
 
     const SLICE_SIZE = 11520;
     for (let offset = 0; offset < len; offset += SLICE_SIZE) {
       const sliceLen = Math.min(SLICE_SIZE, len - offset);
-      const int16Slice = new Int16Array(sliceLen);
-      for (let i = 0; i < sliceLen; i++) {
-        let s = Math.max(-1, Math.min(1, float32Array[offset + i]));
-        int16Slice[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      let int16Slice;
+      if (isInt16) {
+        int16Slice = pcmArray.subarray(offset, offset + sliceLen);
+      } else {
+        int16Slice = new Int16Array(sliceLen);
+        for (let i = 0; i < sliceLen; i++) {
+          let s = Math.max(-1, Math.min(1, pcmArray[offset + i]));
+          int16Slice[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+        }
       }
 
       const mp3buf = this.encoder.encodeBuffer(int16Slice);

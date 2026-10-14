@@ -174,3 +174,104 @@ export async function clearAudioBlobs() {
     return false;
   }
 }
+
+// ============================================================================
+// High-Speed Ephemeral PCM Swap Store (KokoroPcmSwapDB)
+// Allows 10x WebGPU full-book transcription without accumulating GBs of PCM in RAM.
+// Chunks beyond the active 64-chunk RAM window are spilled here and prefetched
+// back into RAM well ahead of Web Audio playback.
+// ============================================================================
+
+const SWAP_DB_NAME = 'KokoroPcmSwapDB';
+const SWAP_DB_VERSION = 1;
+const SWAP_STORE_NAME = 'pcmChunks';
+let cachedSwapDb = null;
+
+function openSwapDB() {
+  if (cachedSwapDb) {
+    return Promise.resolve(cachedSwapDb);
+  }
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      return reject(new Error('IndexedDB no disponible'));
+    }
+    const req = indexedDB.open(SWAP_DB_NAME, SWAP_DB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(SWAP_STORE_NAME)) {
+        db.createObjectStore(SWAP_STORE_NAME, { keyPath: 'id' });
+      }
+    };
+    req.onsuccess = (e) => {
+      cachedSwapDb = e.target.result;
+      cachedSwapDb.onclose = () => { cachedSwapDb = null; };
+      cachedSwapDb.onversionchange = () => {
+        cachedSwapDb.close();
+        cachedSwapDb = null;
+      };
+      resolve(cachedSwapDb);
+    };
+    req.onerror = (e) => reject(e.target.error || new Error('Error abriendo KokoroPcmSwapDB'));
+  });
+}
+
+export async function saveSpilledPcmChunk(id, pcm) {
+  if (!id || !pcm) return false;
+  try {
+    const db = await openSwapDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(SWAP_STORE_NAME, 'readwrite');
+      tx.objectStore(SWAP_STORE_NAME).put({ id, pcm });
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+      tx.onabort = () => resolve(false);
+    });
+  } catch {
+    return false;
+  }
+}
+
+export async function getSpilledPcmChunk(id) {
+  if (!id) return null;
+  try {
+    const db = await openSwapDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(SWAP_STORE_NAME, 'readonly');
+      const req = tx.objectStore(SWAP_STORE_NAME).get(id);
+      req.onsuccess = () => resolve(req.result?.pcm || null);
+      req.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteSpilledPcmChunk(id) {
+  if (!id) return false;
+  try {
+    const db = await openSwapDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(SWAP_STORE_NAME, 'readwrite');
+      tx.objectStore(SWAP_STORE_NAME).delete(id);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+    });
+  } catch {
+    return false;
+  }
+}
+
+export async function clearSpilledPcmChunks() {
+  try {
+    const db = await openSwapDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(SWAP_STORE_NAME, 'readwrite');
+      tx.objectStore(SWAP_STORE_NAME).clear();
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+    });
+  } catch {
+    return false;
+  }
+}
+
