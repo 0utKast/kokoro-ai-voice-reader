@@ -98,7 +98,7 @@ export function splitTextIntoSentences(text) {
   // Handles closing quotes/brackets/dashes, optional footnote numbers (.14, .[14], .¹),
   // and next sentences starting with capitals, ¿/¡, quotes, parentheses, numbers, or dialogue dashes (—No...).
   const rawSentences = protectedText.split(
-    /(?<=[.!?…]["»\x27’”)\]}—]*(?:\[\d{1,4}\]|\d{1,3}|[¹²³⁴⁵⁶⁷⁸⁹⁰]+)?["»\x27’”)\]}]*)\s+(?=(?:[—–-]\s*)?[\p{Lu}¿¡«"“‘\x27(\[\d])/gu
+    /(?<=[.!?…]["»\x27’”)\]}—]*(?:(?:\[\d{1,4}\]|\d{1,3}|[¹²³⁴⁵⁶⁷⁸⁹⁰]+)["»\x27’”)\]}]*)?)\s+(?=(?:[—–-]\s*)?[\p{Lu}¿¡«"“‘\x27(\[\d])/gu
   );
 
   const sentences = [];
@@ -118,7 +118,7 @@ export function splitTextIntoSentences(text) {
  * Breaks a single oversized sentence (> maxChunkLimit) into natural, balanced clauses
  * so that NO piece ever exceeds maxChunkLimit or triggers Kokoro's 510-phoneme truncation.
  */
-function splitOversizedSentence(sentence, normalChunkTarget = 250, maxChunkLimit = 300) {
+function splitOversizedSentence(sentence, normalChunkTarget = 280, maxChunkLimit = 350) {
   const s = sentence.trim();
   if (s.length <= maxChunkLimit) return [s];
 
@@ -189,8 +189,8 @@ function splitOversizedSentence(sentence, normalChunkTarget = 250, maxChunkLimit
  */
 export function splitTextIntoSmartChunks(text, {
   firstChunkTarget = 180,
-  normalChunkTarget = 250,
-  maxChunkLimit = 300
+  normalChunkTarget = 280,
+  maxChunkLimit = 350
 } = {}) {
   const normalized = normalizeTextForSpeech(text);
   if (!normalized) return [];

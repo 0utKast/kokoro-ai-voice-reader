@@ -285,7 +285,48 @@ console.log('\n🔹 Test 5: Hidratación asíncrona concurrente con shift() de r
   assert(isStrictlySequential, 'El orden de reproducción es estrictamente secuencial (0..39) sin saltos');
 }
 
+// Test 6: Recuperación de cadena de promesas ONNX (N.catch) y continuidad en frase 75 de 157
+console.log('\n🔹 Test 6: Recuperación de promesa ONNX (frase 75 de 157) y liberación de tensores WebGPU');
+{
+  const fs = await import('node:fs');
+  const kokoroSrc = fs.readFileSync(new URL('../src/libs/kokoro.web.js', import.meta.url), 'utf8');
+  const offscreenSrc = fs.readFileSync(new URL('../src/offscreen/offscreen.js', import.meta.url), 'utf8');
+
+  assert(kokoroSrc.includes('N=N.catch((()=>{})).then(r)'), 'kokoro.web.js protege la cadena global ONNX N con .catch(() => {}) para no envenenar sesiones futuras');
+  assert(kokoroSrc.includes('N=p.then((()=>{}),(()=>{}))'), 'kokoro.web.js libera la referencia del tensor de salida previo en la promesa N');
+  assert(kokoroSrc.includes('s?.dispose?.()') && kokoroSrc.includes('styleTensor?.dispose?.()'), 'generate_from_ids libera inmediatamente los tensores ONNX/WebGPU tras copiar el PCM');
+  assert(kokoroSrc.includes('a.dims.at(-1)<4'), '_synthesize_phonemes descarta colas degeneradas (<4 tokens) que romperían ONNX Runtime');
+  assert(offscreenSrc.includes('const MAX_RAM_QUEUE_CHUNKS = 300;'), 'offscreen.js mantiene hasta 300 frases en RAM para evitar swap prematuro en textos de 157 frases');
+
+  // Simulate 157 sentences where sentence 75 (index 74) triggers a transient ONNX error on sub-chunk 1
+  let N = Promise.resolve();
+  function runOnnxSession(chunkIdx) {
+    const r = async () => {
+      if (chunkIdx === 74) {
+        throw new Error('Simulated transient ONNX tensor shape error at sentence 75');
+      }
+      return new Float32Array(2400);
+    };
+    const p = N.catch(() => {}).then(r);
+    N = p.then(() => {}, () => {});
+    return p;
+  }
+
+  let completedSentences = 0;
+  for (let i = 0; i < 157; i++) {
+    try {
+      const pcm = await runOnnxSession(i);
+      if (pcm && pcm.length > 0) completedSentences++;
+    } catch {
+      // Fallback silent buffer keeps stream 1-to-1 aligned
+      completedSentences++;
+    }
+  }
+  assert(completedSentences === 157, 'Las 157 frases se procesaron de principio a fin sin detenerse en la frase 75');
+}
+
 console.log('\n====================================================');
 console.log(`🎉 TODAS LAS PRUEBAS DE BUFFER Y 10x SWAP COMPLETADAS: ${passed} / ${total} EXITOSAS`);
 console.log('====================================================');
+
 

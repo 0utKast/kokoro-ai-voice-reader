@@ -518,8 +518,8 @@ async function startPlayback(startChunkIndex = 0) {
   // Pre-split text and render full structured paragraphs immediately
   const preChunks = splitTextIntoSmartChunks(text, {
     firstChunkTarget: 180,
-    normalChunkTarget: 250,
-    maxChunkLimit: 300
+    normalChunkTarget: 280,
+    maxChunkLimit: 350
   });
 
   currentChunks = preChunks;
@@ -593,10 +593,10 @@ async function resumePlayback() {
 async function stopPlayback(reset = false) {
   activeChunkIndex = 0;
   await chrome.runtime.sendMessage({ type: MESSAGE_TYPES.STOP_PLAYBACK, reset }).catch(() => {});
-  updatePlayPauseUI(false, false, !reset && !isConversionComplete);
+  updatePlayPauseUI(false, false, false);
 }
 
-function resetConversionState({ clearStorage = false } = {}) {
+function resetConversionState({ clearStorage = false, notifyOffscreen = true } = {}) {
   isConversionComplete = false;
   totalExpectedChunks = 0;
   lastConvertedText = '';
@@ -630,7 +630,9 @@ function resetConversionState({ clearStorage = false } = {}) {
     clearAudioBlobs().catch(() => {});
     chrome.storage.local.remove('kokoro_last_conversion').catch(() => {});
   }
-  chrome.runtime.sendMessage({ type: 'RESET_STATE' }).catch(() => {});
+  if (notifyOffscreen) {
+    chrome.runtime.sendMessage({ type: 'RESET_STATE' }).catch(() => {});
+  }
 }
 
 // 4. Setup Event Listeners
@@ -1168,7 +1170,7 @@ function setupEventListeners() {
 
       case 'SELECTION_TEXT_LOADED': {
         if (message.text && textInput) {
-          resetConversionState({ clearStorage: false });
+          resetConversionState({ clearStorage: false, notifyOffscreen: false });
           textInput.value = message.text;
         }
         break;
