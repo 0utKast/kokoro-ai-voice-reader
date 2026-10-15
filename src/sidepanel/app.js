@@ -517,9 +517,9 @@ async function startPlayback(startChunkIndex = 0) {
 
   // Pre-split text and render full structured paragraphs immediately
   const preChunks = splitTextIntoSmartChunks(text, {
-    firstChunkTarget: 200,
-    normalChunkTarget: 350,
-    maxChunkLimit: 450
+    firstChunkTarget: 180,
+    normalChunkTarget: 250,
+    maxChunkLimit: 300
   });
 
   currentChunks = preChunks;

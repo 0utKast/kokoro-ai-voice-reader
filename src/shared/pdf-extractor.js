@@ -37,6 +37,7 @@ export async function extractTextFromPDF(arrayBuffer, onProgress = null) {
         const rawLines = [];
         let currentLine = '';
         let lastY = null;
+        let pendingDy = 12;
         const lineSpacings = [];
 
         for (const item of textContent.items) {
@@ -47,7 +48,10 @@ export async function extractTextFromPDF(arrayBuffer, onProgress = null) {
             const dy = Math.abs(y - lastY);
             lineSpacings.push(dy);
             if (currentLine.trim()) {
-              rawLines.push({ text: currentLine.trim(), dy: dy });
+              rawLines.push({ text: currentLine.trim(), dy: pendingDy });
+              pendingDy = dy;
+            } else {
+              pendingDy = Math.max(pendingDy, dy);
             }
             currentLine = item.str;
           } else {
@@ -57,7 +61,7 @@ export async function extractTextFromPDF(arrayBuffer, onProgress = null) {
         }
 
         if (currentLine.trim()) {
-          rawLines.push({ text: currentLine.trim(), dy: 12 });
+          rawLines.push({ text: currentLine.trim(), dy: pendingDy });
         }
 
         // Strip isolated header/footer page numbers at the very top or bottom of a page

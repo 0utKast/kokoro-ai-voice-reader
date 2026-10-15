@@ -235,30 +235,60 @@ function cachePlayedChunkInRam(item) {
   }
 }
 
+let activeHydrationPromise = null;
+
 async function hydratePendingQueueFromSwap(sessionId = activeSessionId, batchSize = 16) {
-  if (isHydratingQueue) return;
+  if (activeHydrationPromise) {
+    return activeHydrationPromise;
+  }
   isHydratingQueue = true;
-  try {
-    let hydrated = 0;
-    for (let i = 0; i < pendingAudioQueue.length && hydrated < batchSize; i++) {
-      if (activeSessionId !== sessionId || !isPlaying) break;
-      const item = pendingAudioQueue[i];
-      if (!item.pcm && item.spilledKey) {
+  activeHydrationPromise = (async () => {
+    try {
+      let hydrated = 0;
+      while (hydrated < batchSize) {
+        if (activeSessionId !== sessionId || !isPlaying) break;
+        // Always locate the first unhydrated chunk from the front of the queue.
+        // Using .find() instead of a fixed loop index `i` prevents skipping chunks when
+        // schedulePendingAudioChunks() calls pendingAudioQueue.shift() while awaiting IndexedDB.
+        const item = pendingAudioQueue.find(it => !it.pcm && it.spilledKey);
+        if (!item) break;
         const key = item.spilledKey;
         const pcm = await getSpilledPcmChunk(key);
-        if (pcm && activeSessionId === sessionId) {
+        if (activeSessionId !== sessionId || !isPlaying) break;
+        if (pcm) {
           item.pcm = pcm;
           item.spilledKey = null;
           deleteSpilledPcmChunk(key).catch(() => {});
           hydrated++;
+          // If the front of the queue was waiting on this exact chunk, schedule it immediately
+          if (pendingAudioQueue[0] === item && isPlaying && !isPaused) {
+            schedulePendingAudioChunks();
+          }
+        } else {
+          item.spilledKey = null;
+          break;
         }
       }
+      if (hydrated > 0 && isPlaying && !isPaused && activeSessionId === sessionId) {
+        schedulePendingAudioChunks();
+      }
+    } finally {
+      isHydratingQueue = false;
+      activeHydrationPromise = null;
     }
-    if (hydrated > 0 && isPlaying && !isPaused && activeSessionId === sessionId) {
-      schedulePendingAudioChunks();
-    }
-  } finally {
-    isHydratingQueue = false;
+  })();
+
+  await activeHydrationPromise;
+
+  if (
+    isPlaying &&
+    !isPaused &&
+    activeSessionId === sessionId &&
+    pendingAudioQueue.length > 0 &&
+    !pendingAudioQueue[0].pcm &&
+    pendingAudioQueue[0].spilledKey
+  ) {
+    return hydratePendingQueueFromSwap(sessionId, batchSize);
   }
 }
 
@@ -458,9 +488,9 @@ async function playText(text, options = {}) {
   const smartChunks = (options.reuseSmartChunks && currentSmartChunks.length > 0)
     ? currentSmartChunks
     : splitTextIntoSmartChunks(text, {
-        firstChunkTarget: 200,
-        normalChunkTarget: 350,
-        maxChunkLimit: 450
+        firstChunkTarget: 180,
+        normalChunkTarget: 250,
+        maxChunkLimit: 300
       });
 
   stopAudioPlayback(false, false);

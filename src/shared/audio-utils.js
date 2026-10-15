@@ -24,6 +24,15 @@ export function normalizeTextForSpeech(text) {
 
   let clean = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
+  // Remove ASCII box-drawing diagrams and markdown code fences that cause non-speech phoneme bloat
+  clean = clean.replace(/```[\s\S]*?```/g, (block) => {
+    // Keep readable text inside code blocks if it has letters, but strip box drawing chars
+    return block.replace(/```/g, '').replace(/[┌─┐│└┘├┤┬┴┼╔═╗║╚╝╠╣╦╩╬▼▲◄►]/g, ' ');
+  });
+  clean = clean.replace(/[┌─┐│└┘├┤┬┴┼╔═╗║╚╝╠╣╦╩╬]/g, ' ');
+  // Strip decorative markdown bold/italic asterisks/underscores around words so eSpeak doesn't say "asterisco"
+  clean = clean.replace(/\*{1,3}([^*\n]+)\*{1,3}/g, '$1');
+
   // 1. Join hyphenated words split across lines
   clean = clean.replace(/([\p{L}]+)-\s*\n\s*([\p{L}]+)/gu, '$1$2');
 
@@ -36,15 +45,15 @@ export function normalizeTextForSpeech(text) {
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i];
       // Keep separation if line looks like a list item or heading
-      if (/^[-*•\d+.)]/.test(line)) {
-        combined += '\n\n' + line;
+      if (/^[-*•#\d+.)]/.test(line) || /^#{1,6}\s/.test(combined.split('\n').pop() || '')) {
+        combined += '\n\n' + line.replace(/^#{1,6}\s+/, '');
       } else if (combined.endsWith('-')) {
         combined = combined.slice(0, -1) + line;
       } else {
         combined += ' ' + line;
       }
     }
-    return combined;
+    return combined.replace(/^#{1,6}\s+/, '');
   }).filter(Boolean);
 
   return normalizedParagraphs.join('\n\n').trim();
@@ -78,15 +87,19 @@ export function splitTextIntoSentences(text) {
     return ph;
   });
 
-  // Also protect decimal numbers (e.g. 3.14, 10.5)
-  protectedText = protectedText.replace(/(\d+)\.(\d+)/g, (match) => {
+  // Also protect decimal and thousand-separated numbers (e.g. 3.14, 26.000, 1.234.567)
+  protectedText = protectedText.replace(/\d+(?:\.\d+)+/g, (match) => {
     const ph = `___ABB_${placeholderId++}___`;
     abbrevMap.set(ph, match);
     return ph;
   });
 
-  // Split on sentence boundaries: punctuation (. ! ? …) followed by space and capital/symbol/quote
-  const rawSentences = protectedText.split(/(?<=[.!?…]["»\x27”)]?)\s+(?=[A-ZÁÉÍÓÚÜÑ¿¡«"“\d])/g);
+  // Split on sentence boundaries:
+  // Handles closing quotes/brackets/dashes, optional footnote numbers (.14, .[14], .¹),
+  // and next sentences starting with capitals, ¿/¡, quotes, parentheses, numbers, or dialogue dashes (—No...).
+  const rawSentences = protectedText.split(
+    /(?<=[.!?…]["»\x27’”)\]}—]*(?:\[\d{1,4}\]|\d{1,3}|[¹²³⁴⁵⁶⁷⁸⁹⁰]+)?["»\x27’”)\]}]*)\s+(?=(?:[—–-]\s*)?[\p{Lu}¿¡«"“‘\x27(\[\d])/gu
+  );
 
   const sentences = [];
   for (let s of rawSentences) {
@@ -102,21 +115,99 @@ export function splitTextIntoSentences(text) {
 }
 
 /**
+ * Breaks a single oversized sentence (> maxChunkLimit) into natural, balanced clauses
+ * so that NO piece ever exceeds maxChunkLimit or triggers Kokoro's 510-phoneme truncation.
+ */
+function splitOversizedSentence(sentence, normalChunkTarget = 250, maxChunkLimit = 300) {
+  const s = sentence.trim();
+  if (s.length <= maxChunkLimit) return [s];
+
+  // Level 1: Split by major clause delimiters (; : — – …) and commas or closing parens
+  const rawClauses = s.split(/(?<=[;:\n—–…])\s+|(?<=[,)])\s+/g).map(p => p.trim()).filter(Boolean);
+
+  // Level 2: Ensure each individual clause is <= maxChunkLimit (split at conjunctions/prepositions or word boundaries if needed)
+  const boundedParts = [];
+  for (const clause of rawClauses) {
+    if (clause.length <= maxChunkLimit) {
+      boundedParts.push(clause);
+      continue;
+    }
+
+    // Split before common Spanish/English conjunctions and relative pronouns
+    const conjParts = clause.split(
+      /\s+(?=(?:y|e|o|u|ni|pero|mas|sino|aunque|porque|pues|mientras|donde|cuando|como|que|quien|quienes|cuyo|cuya|para|según|hacia|hasta|entre|sobre|durante|mediante|and|or|but|because|while|where|when|which|that|who|since|although|though)\b)/gi
+    ).map(p => p.trim()).filter(Boolean);
+
+    for (const cp of conjParts) {
+      if (cp.length <= maxChunkLimit) {
+        boundedParts.push(cp);
+      } else {
+        // Level 3: Hard fallback at word boundaries so no single piece can ever exceed maxChunkLimit
+        const words = cp.split(/\s+/);
+        let wordBuf = '';
+        for (const w of words) {
+          if (!wordBuf) {
+            wordBuf = w;
+          } else if ((wordBuf + ' ' + w).length <= normalChunkTarget) {
+            wordBuf += ' ' + w;
+          } else {
+            boundedParts.push(wordBuf);
+            wordBuf = w;
+          }
+        }
+        if (wordBuf) boundedParts.push(wordBuf);
+      }
+    }
+  }
+
+  // Re-pack bounded parts up to normalChunkTarget / maxChunkLimit for natural prosodic flow
+  const packed = [];
+  let buf = '';
+  for (const part of boundedParts) {
+    if (!buf) {
+      buf = part;
+    } else if ((buf + ' ' + part).length <= normalChunkTarget) {
+      buf += ' ' + part;
+    } else {
+      packed.push(buf.trim());
+      buf = part;
+    }
+  }
+  if (buf.trim()) {
+    packed.push(buf.trim());
+  }
+
+  return packed;
+}
+
+/**
  * Splits text into natural sentence-level and clause chunks optimal for Kokoro-82M TTS.
  * - Never breaks in the middle of sentences or at commas (unless sentence exceeds maxChunkLimit).
- * - Groups short sentences together up to target character length for fluent, natural neural prosody.
+ * - Applies recursive clause/conjunction splitting to ALL oversized sentences regardless of position in paragraph,
+ *   preventing Kokoro's 510-phoneme tokenizer truncation from ever eating lines of text.
  * - Marks paragraph boundaries so audio playback can insert a natural paragraph pause.
  */
 export function splitTextIntoSmartChunks(text, {
-  firstChunkTarget = 200,
-  normalChunkTarget = 350,
-  maxChunkLimit = 450
+  firstChunkTarget = 180,
+  normalChunkTarget = 250,
+  maxChunkLimit = 300
 } = {}) {
   const normalized = normalizeTextForSpeech(text);
   if (!normalized) return [];
 
   const paragraphs = normalized.split(/\n{2,}/);
   const chunks = [];
+
+  const pushChunk = (chunkText, pIdx, isParagraphEnd) => {
+    const clean = chunkText.trim();
+    if (!clean || !/[\p{L}\p{N}]/u.test(clean)) return;
+    chunks.push({
+      text: clean,
+      paragraphIndex: pIdx,
+      isParagraphEnd,
+      wordCount: clean.split(/\s+/).filter(Boolean).length
+    });
+  };
 
   for (let pIdx = 0; pIdx < paragraphs.length; pIdx++) {
     const para = paragraphs[pIdx].trim();
@@ -131,50 +222,33 @@ export function splitTextIntoSmartChunks(text, {
 
       const target = (chunks.length === 0 && !currentChunk) ? firstChunkTarget : normalChunkTarget;
 
-      if (!currentChunk) {
-        if (s.length > maxChunkLimit) {
-          // Break oversized sentence by semicolon/colon or comma
-          const subParts = s.split(/(?<=[;:\n—])\s+|(?<=[,])\s+(?=[a-záéíóúüñ])/gi);
-          for (const sp of subParts) {
-            if ((currentChunk + " " + sp).trim().length <= normalChunkTarget) {
-              currentChunk = currentChunk ? (currentChunk + " " + sp) : sp;
-            } else {
-              if (currentChunk.trim()) {
-                chunks.push({
-                  text: currentChunk.trim(),
-                  paragraphIndex: pIdx,
-                  isParagraphEnd: false,
-                  wordCount: currentChunk.trim().split(/\s+/).filter(Boolean).length
-                });
-              }
-              currentChunk = sp;
-            }
-          }
-        } else {
-          currentChunk = s;
+      if (currentChunk && (currentChunk + " " + s).length <= target) {
+        currentChunk += " " + s;
+        continue;
+      }
+
+      // If currentChunk already holds text that cannot accommodate `s`, flush currentChunk first
+      if (currentChunk) {
+        pushChunk(currentChunk, pIdx, false);
+        currentChunk = "";
+      }
+
+      // Now handle `s` (whether it was the first sentence in the paragraph OR followed a flushed chunk!)
+      if (s.length > maxChunkLimit) {
+        const subChunks = splitOversizedSentence(s, normalChunkTarget, maxChunkLimit);
+        for (let i = 0; i < subChunks.length - 1; i++) {
+          pushChunk(subChunks[i], pIdx, false);
         }
+        currentChunk = subChunks[subChunks.length - 1] || "";
       } else {
-        if ((currentChunk + " " + s).length <= target) {
-          currentChunk += " " + s;
-        } else {
-          chunks.push({
-            text: currentChunk.trim(),
-            paragraphIndex: pIdx,
-            isParagraphEnd: false,
-            wordCount: currentChunk.trim().split(/\s+/).filter(Boolean).length
-          });
-          currentChunk = s;
-        }
+        currentChunk = s;
       }
     }
 
     if (currentChunk.trim()) {
-      chunks.push({
-        text: currentChunk.trim(),
-        paragraphIndex: pIdx,
-        isParagraphEnd: true,
-        wordCount: currentChunk.trim().split(/\s+/).filter(Boolean).length
-      });
+      pushChunk(currentChunk, pIdx, true);
+    } else if (chunks.length > 0 && chunks[chunks.length - 1].paragraphIndex === pIdx) {
+      chunks[chunks.length - 1].isParagraphEnd = true;
     }
   }
 

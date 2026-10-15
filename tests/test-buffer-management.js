@@ -215,6 +215,76 @@ console.log('\n🔹 Test 4: Limpieza y ciclo de vida de nodos de audio');
   assert(node.buffer === null, 'La referencia al buffer fue liberada a null para permitir GC inmediato');
 }
 
+// Test 5: Concurrent pendingAudioQueue.shift() during async Swap Hydration (Zero Skipped Chunks)
+console.log('\n🔹 Test 5: Hidratación asíncrona concurrente con shift() de reproducción (cero saltos de línea)');
+{
+  const queue = [];
+  const swap = new Map();
+  for (let i = 0; i < 40; i++) {
+    if (i < 10) {
+      queue.push({ chunkIndex: i, pcm: new Int16Array([i]), spilledKey: null });
+    } else {
+      const key = `swap_${i}`;
+      swap.set(key, new Int16Array([i]));
+      queue.push({ chunkIndex: i, pcm: null, spilledKey: key });
+    }
+  }
+
+  const playedOrder = [];
+  let activeHydrationPromise = null;
+
+  async function hydrateBatch(batchSize = 8) {
+    if (activeHydrationPromise) {
+      await activeHydrationPromise;
+      if (queue.length > 0 && !queue[0].pcm && queue[0].spilledKey) {
+        return hydrateBatch(batchSize);
+      }
+      return;
+    }
+    activeHydrationPromise = (async () => {
+      try {
+        let hydrated = 0;
+        while (hydrated < batchSize) {
+          const item = queue.find(it => !it.pcm && it.spilledKey);
+          if (!item) break;
+          const key = item.spilledKey;
+          // Simulate async IndexedDB latency while playback shifts items from queue front!
+          await new Promise(r => setTimeout(r, 2));
+          const pcm = swap.get(key);
+          if (pcm) {
+            item.pcm = pcm;
+            item.spilledKey = null;
+            swap.delete(key);
+            hydrated++;
+          }
+        }
+      } finally {
+        activeHydrationPromise = null;
+      }
+    })();
+    return activeHydrationPromise;
+  }
+
+  // Interleave playback shifts and async swap hydrations
+  while (queue.length > 0) {
+    if (!queue[0].pcm && queue[0].spilledKey) {
+      await hydrateBatch(8);
+    }
+    const next = queue.shift();
+    assert(next && next.pcm !== null, `El fragmento #${next?.chunkIndex} está hidratado al llegar al frente de reproducción`);
+    playedOrder.push(next.chunkIndex);
+    // Trigger background hydration concurrently while shifting
+    if (queue.filter(it => it.pcm !== null).length < 6) {
+      hydrateBatch(4); // unawaited concurrent hydration
+    }
+    await new Promise(r => setTimeout(r, 1));
+  }
+
+  assert(playedOrder.length === 40, 'Se reprodujeron exactamente los 40 fragmentos sin omitir ninguno');
+  const isStrictlySequential = playedOrder.every((val, idx) => val === idx);
+  assert(isStrictlySequential, 'El orden de reproducción es estrictamente secuencial (0..39) sin saltos');
+}
+
 console.log('\n====================================================');
 console.log(`🎉 TODAS LAS PRUEBAS DE BUFFER Y 10x SWAP COMPLETADAS: ${passed} / ${total} EXITOSAS`);
 console.log('====================================================');

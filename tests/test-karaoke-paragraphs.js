@@ -95,6 +95,27 @@ console.log('\n🔹 Test 4: Protección de abreviaturas en español/inglés e in
   assert(sentences[0].includes('Mr. Smith') && sentences[0].includes('J. K. Rowling') && sentences[0].includes('St. Pancras'), 'La primera oración preserva Mr., Mrs., Dr., J. K. y St. sin cortes prematuros');
 }
 
+// Test 5: Oraciones largas en mitad de párrafo (prevención de truncamiento de 510 fonemas)
+console.log('\n🔹 Test 5: Subdivisión de oraciones largas en mitad de párrafo (cero líneas comidas)');
+{
+  const para = 'El silencio se apoderó de la sala. Durante aquellos largos años de incertidumbre en la capital, mientras los ministros debatían interminablemente sobre los presupuestos de la corona y los comerciantes del puerto reclamaban nuevas rutas hacia las colonias del sur, nadie en el palacio había sospechado que el verdadero artífice de la conspiración se ocultaba tras los muros de la antigua biblioteca real, esperando pacientemente el momento oportuno para revelar los documentos secretos que cambiarían para siempre el destino de toda la nación. Todos se miraron con asombro.';
+  const chunks = splitTextIntoSmartChunks(para, { firstChunkTarget: 180, normalChunkTarget: 250, maxChunkLimit: 300 });
+  const maxLen = Math.max(...chunks.map(c => c.text.length));
+  const reconstructed = chunks.map(c => c.text).join(' ');
+
+  assert(maxLen <= 300, `Ningún fragmento supera maxChunkLimit=300 (máx: ${maxLen} chars) incluso cuando la oración larga es la 2ª del párrafo`);
+  assert(reconstructed.includes('cambiarían para siempre el destino de toda la nación.'), 'El final de la oración larga se preserva íntegramente sin truncamiento');
+  assert(reconstructed.includes('Todos se miraron con asombro.'), 'La oración posterior se mantiene intacta');
+}
+
+// Test 6: Diálogos con raya, notas al pie y paréntesis
+console.log('\n🔹 Test 6: Separación de diálogos españoles (—), notas al pie (.14) y paréntesis');
+{
+  const dialogueText = 'Terminó el informe a las ocho.14 Al día siguiente presentó su renuncia. —No puedo seguir así —declaró ante el comité—. (Nadie intentó detenerlo).';
+  const sents = splitTextIntoSentences(dialogueText);
+  assert(sents.length >= 4, `Se separan correctamente notas al pie, rayas de diálogo y paréntesis en oraciones independientes (obtenido: ${sents.length})`);
+}
+
 console.log('\n====================================================');
 console.log(`🎉 PRUEBAS DE KARAOKE: ${passed} / ${total} EXITOSAS`);
 console.log('====================================================\n');
